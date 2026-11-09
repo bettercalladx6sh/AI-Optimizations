@@ -1,9 +1,10 @@
 """EC2 analysis runs: store instances, detect configuration changes, report evaluation readiness.
 
 Every run stores each instance, its full configuration (a new snapshot whenever it changes),
-its tags, volumes and typed specs in the analysis database. The first run for an account and
-region creates the baseline; every later run compares with the stored configuration and
-stores each change for later inspection.
+its tags, volumes and typed specs, and its hourly CPU and memory averages from CloudWatch for
+the whole window in the analysis database. The first run for an account and region creates
+the baseline; every later run compares with the stored configuration and stores each change
+for later inspection.
 
 An instance can only be evaluated once a full analysis window has passed since it was
 launched or last changed; until then clients are told to wait.
@@ -14,6 +15,8 @@ from __future__ import annotations
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+
+from rich.markup import escape
 
 from app import db
 from app.auth import aws_auth
@@ -29,6 +32,14 @@ from app.cloud.aws.ec2.changes import (
 )
 from app.cloud.aws.ec2.configuration import InstanceConfiguration, get_configurations
 from app.cloud.aws.ec2.instances import INSTANCE_STATES, state_summary
+from app.cloud.aws.ec2.metrics import (
+    METRICS,
+    MetricSeries,
+    by_instance,
+    collect_metrics,
+    collection_window,
+    print_series_summary,
+)
 from app.cloud.display import field, print_header, section
 from app.db import resources
 
@@ -86,6 +97,7 @@ class AnalysisResult:
     snapshots: dict[str, InstanceSnapshot]
     changes: list[InstanceChange]
     readiness: list[Readiness]
+    metrics: dict[str, list[MetricSeries]]
 
 
 def _readiness(
@@ -127,8 +139,9 @@ def _store_run(
     now: datetime,
     configs: dict[str, InstanceConfiguration],
     current: dict[str, InstanceSnapshot],
+    metrics: dict[str, list[MetricSeries]],
 ) -> tuple[bool, list[InstanceChange], dict[str, resources.StoredResource], dict[str, str]]:
-    """Compare with the stored configuration, then store instances, snapshots and changes."""
+    """Compare with the stored configuration, then store instances, snapshots, changes and metrics."""
     stored = resources.load_resources(connection, instance_scope)
     first_run = not stored
     active = {
@@ -153,6 +166,8 @@ def _store_run(
         if change := by_id.get(instance_id):
             before_id = entry.current_snapshot_id if entry and change.kind == "modified" else None
             store.record_change(connection, resource, run_id, now, change, before_id, snapshot_id)
+        if instance_id in metrics:
+            store.save_metrics(connection, resource, run_id, now, metrics[instance_id])
 
     for change in changes:
         if change.kind == "removed":
@@ -165,7 +180,8 @@ def _store_run(
 
 
 def run_analysis(window_key: str = DEFAULT_WINDOW, region: str | None = None) -> AnalysisResult:
-    """Run one analysis: store everything, detect changes, compute readiness.
+    """Run one analysis: collect configuration and metrics, store everything, detect changes,
+    compute readiness.
 
     The run is recorded first, so a failure is kept in analysis_runs with its error.
     """
@@ -176,6 +192,12 @@ def run_analysis(window_key: str = DEFAULT_WINDOW, region: str | None = None) ->
 
     configs = {config.instance.instance_id: config for config in get_configurations(region, states=INSTANCE_STATES)}
     current = {instance_id: snapshot_instance(config) for instance_id, config in configs.items()}
+    metrics = by_instance(collect_metrics(
+        (iid for iid, snapshot in current.items() if snapshot.state != "terminated"),
+        window.duration,
+        region,
+        now,
+    ))
 
     with db.session() as connection:
         account_ref = resources.upsert_account(connection, store.PROVIDER, account_id, now)
@@ -188,7 +210,7 @@ def run_analysis(window_key: str = DEFAULT_WINDOW, region: str | None = None) ->
     try:
         with db.session() as connection:
             first_run, changes, stored, restarted = _store_run(
-                connection, instance_scope, run_id, now, configs, current
+                connection, instance_scope, run_id, now, configs, current, metrics
             )
     except BaseException as exc:
         with suppress(Exception), db.session() as connection:
@@ -217,6 +239,7 @@ def run_analysis(window_key: str = DEFAULT_WINDOW, region: str | None = None) ->
         snapshots=current,
         changes=changes,
         readiness=readiness,
+        metrics=metrics,
     )
 
 
@@ -271,6 +294,8 @@ def print_analysis(result: AnalysisResult) -> None:
             print_change(change)
     console.print()
 
+    print_utilization(result.metrics, result.snapshots, window)
+
     section(f"Evaluation readiness ({window.key} window)", indent=0)
     if not result.readiness:
         console.print("  [dim]No instances to evaluate.[/]")
@@ -293,6 +318,79 @@ def print_analysis(result: AnalysisResult) -> None:
         "Run the analysis again then; changed instances are re-checked on every run",
     ))
     console.print()
+
+
+def print_utilization(
+    metrics: dict[str, list[MetricSeries]],
+    names: dict[str, InstanceSnapshot] | dict[str, str],
+    window: AnalysisWindow,
+) -> None:
+    """Print each instance's CPU and memory: average, peak hourly average and hours collected."""
+    series = [item for items in metrics.values() for item in items]
+    start, end = (series[0].window_start, series[0].window_end) if series else collection_window(window.duration)
+    section(f"Utilization · hourly averages · {_when(start)} → {_when(end)}", indent=0)
+    if not metrics:
+        console.print("  [dim]No running instances to measure.[/]")
+    for instance_id in sorted(metrics, key=lambda iid: (_name(names, iid).lower(), iid)):
+        name = _name(names, instance_id)
+        console.print(f"  [bold]{escape(name) if name else '[dim](no name)[/]'}[/] [dim]·[/] {instance_id}")
+        print_series_summary(metrics[instance_id])
+    console.print()
+
+
+def _name(names: dict[str, InstanceSnapshot] | dict[str, str], instance_id: str) -> str:
+    value = names.get(instance_id, "")
+    return value.name if isinstance(value, InstanceSnapshot) else value
+
+
+def get_stored_metrics(
+    window_key: str = DEFAULT_WINDOW,
+    region: str | None = None,
+    resource: str | None = None,
+) -> tuple[dict[str, str], dict[str, list[MetricSeries]]]:
+    """Read stored hourly averages for the window (no CloudWatch calls)."""
+    window = ANALYSIS_WINDOWS[window_key]
+    account_id = aws_auth.get_identity().account_id
+    region = region or aws_auth.get_session().region_name
+    start, end = collection_window(window.duration)
+    with db.session() as connection:
+        account_ref = resources.upsert_account(connection, store.PROVIDER, account_id, datetime.now(timezone.utc))
+        names, series = store.load_metrics(connection, store.scope(account_ref, region), start, end, resource)
+    return names, by_instance(series)
+
+
+def print_stored_metrics(
+    names: dict[str, str],
+    metrics: dict[str, list[MetricSeries]],
+    region: str,
+    window_key: str,
+    hourly: bool = False,
+) -> None:
+    """Print the stored utilization summary; with `hourly`, every hourly average too."""
+    window = ANALYSIS_WINDOWS[window_key]
+    print_header("EC2 utilization", region, len(metrics), f"{window.key} window · stored hourly averages")
+    if not metrics:
+        warning("No stored instances match; run an analysis first: python -m app.cloud.aws.ec2 run")
+        console.print()
+        return
+    print_utilization(metrics, names, window)
+    if not hourly:
+        return
+
+    for instance_id, series in sorted(metrics.items()):
+        section(f"Hourly averages · {names.get(instance_id) or '(no name)'} · {instance_id}", indent=0)
+        hours = sorted({point.period_start for item in series for point in item.datapoints})
+        if not hours:
+            console.print("  [dim]No datapoints stored for this window.[/]")
+        values = {(item.metric.key, point.period_start): point.average for item in series for point in item.datapoints}
+        for hour in hours:
+            readings = " [dim]·[/] ".join(
+                f"{metric.label} {values[(metric.key, hour)]:.1f}%" if (metric.key, hour) in values
+                else f"{metric.label} [dim]—[/]"
+                for metric in METRICS
+            )
+            console.print(f"  [dim]{_when(hour)}[/]  {readings}")
+        console.print()
 
 
 def get_history(region: str | None = None, resource: str | None = None, limit: int = 20) -> list[StoredChange]:

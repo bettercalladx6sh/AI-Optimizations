@@ -1,0 +1,1 @@
+"""Cloud provider resource discovery."""

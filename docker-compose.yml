@@ -1,0 +1,33 @@
+# Local analysis database: stores instance baselines, detected changes and analysis runs.
+# The company database is only ever read; everything the app writes goes here.
+#
+# Start:  docker compose up -d
+# Stop:   docker compose down          (data is kept in the analysis-db-data volume)
+# Reset:  docker compose down -v       (deletes all stored analysis data)
+#
+# Credentials come from the ANALYSIS_DB_* variables in .env.
+
+services:
+  analysis-db:
+    image: mysql:8.4
+    container_name: cost-optimizer-analysis-db
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${ANALYSIS_DB_NAME:?set ANALYSIS_DB_NAME in .env}
+      MYSQL_USER: ${ANALYSIS_DB_USER:?set ANALYSIS_DB_USER in .env}
+      MYSQL_PASSWORD: ${ANALYSIS_DB_PASSWORD:?set ANALYSIS_DB_PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD: ${ANALYSIS_DB_ROOT_PASSWORD:?set ANALYSIS_DB_ROOT_PASSWORD in .env}
+    ports:
+      # Bound to localhost only, so the database is not reachable from the network.
+      - "127.0.0.1:${ANALYSIS_DB_PORT:-3308}:3306"
+    volumes:
+      - analysis-db-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  analysis-db-data:

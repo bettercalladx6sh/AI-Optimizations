@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from botocore.exceptions import BotoCoreError, ClientError
 from rich.markup import escape
 
 from app.auth import aws_auth
-from app.auth.common import AuthError, console
+from app.auth.common import console
+from app.cloud.aws.errors import aws_errors
+from app.cloud.display import field, print_header
 
 INSTANCE_STATES = ("pending", "running", "shutting-down", "stopping", "stopped", "terminated")
 DEFAULT_STATES = tuple(state for state in INSTANCE_STATES if state != "terminated")
@@ -24,14 +25,11 @@ STATE_STYLES = {
     "shutting-down": "yellow",
     "terminated": "dim",
 }
-NOT_SET = "—"
-LABEL_WIDTH = 13
 
-PERMISSION_HINTS = ("Grant the IAM identity the ec2:DescribeInstances permission",)
-
-
-class Ec2Error(AuthError):
-    """Raised when EC2 cannot be queried (permissions, region or network)."""
+INSTANCE_ID_HINTS = {
+    "InvalidInstanceID.Malformed": ("Instance IDs look like i-0123456789abcdef0",),
+    "InvalidInstanceID.NotFound": ("Check the instance ID and --region",),
+}
 
 
 @dataclass(frozen=True)
@@ -46,16 +44,16 @@ class Ec2Instance:
     private_ip: str
 
 
-def _tag(tags: Iterable[dict[str, str]], key: str) -> str:
+def tag_value(tags: Iterable[Mapping[str, str]], key: str) -> str:
     """Return the value of one resource tag, or an empty string."""
     return next((tag["Value"] for tag in tags if tag.get("Key") == key), "")
 
 
-def _to_instance(raw: dict[str, Any]) -> Ec2Instance:
+def to_instance(raw: Mapping[str, Any]) -> Ec2Instance:
     """Convert one describe_instances record into an Ec2Instance."""
     return Ec2Instance(
         instance_id=raw["InstanceId"],
-        name=_tag(raw.get("Tags", []), "Name"),
+        name=tag_value(raw.get("Tags", []), "Name"),
         state=raw["State"]["Name"],
         vpc_id=raw.get("VpcId", ""),
         public_ip=raw.get("PublicIpAddress", ""),
@@ -63,57 +61,58 @@ def _to_instance(raw: dict[str, Any]) -> Ec2Instance:
     )
 
 
+def sort_key(instance: Ec2Instance) -> tuple[bool, bool, str, str]:
+    """Running first; within each group, named by name, unnamed last."""
+    return (instance.state != "running", not instance.name, instance.name.lower(), instance.instance_id)
+
+
+def describe_instances(
+    region: str | None = None,
+    states: Iterable[str] = DEFAULT_STATES,
+    instance_ids: Iterable[str] = (),
+    filters: Iterable[Mapping[str, Any]] = (),
+) -> list[dict[str, Any]]:
+    """Return raw describe_instances records (all pages) matching the given filters."""
+    client = aws_auth.get_client("ec2", region=region)
+    request: dict[str, Any] = {
+        "Filters": [{"Name": "instance-state-name", "Values": list(states)}, *filters],
+    }
+    if ids := list(instance_ids):
+        request["InstanceIds"] = ids
+
+    with aws_errors("ec2:DescribeInstances", INSTANCE_ID_HINTS):
+        return [
+            raw
+            for page in client.get_paginator("describe_instances").paginate(**request)
+            for reservation in page["Reservations"]
+            for raw in reservation["Instances"]
+        ]
+
+
 def list_instances(
     region: str | None = None,
     states: Iterable[str] = DEFAULT_STATES,
 ) -> list[Ec2Instance]:
-    """Return every instance in the region whose state is in `states`.
-
-    Running instances come first; within each group named instances are sorted
-    by name and unnamed ones come last.
-    """
-    client = aws_auth.get_client("ec2", region=region)
-    filters = [{"Name": "instance-state-name", "Values": list(states)}]
-
-    try:
-        instances = [
-            _to_instance(raw)
-            for page in client.get_paginator("describe_instances").paginate(Filters=filters)
-            for reservation in page["Reservations"]
-            for raw in reservation["Instances"]
-        ]
-    except ClientError as exc:
-        error = exc.response["Error"]
-        hints = PERMISSION_HINTS if error.get("Code") == "UnauthorizedOperation" else ()
-        raise Ec2Error(error.get("Message", str(exc)), hints) from exc
-    except BotoCoreError as exc:
-        raise Ec2Error(str(exc)) from exc
-
-    return sorted(
-        instances,
-        key=lambda i: (i.state != "running", not i.name, i.name.lower(), i.instance_id),
-    )
+    """Return every instance in the region whose state is in `states`, sorted."""
+    return sorted((to_instance(raw) for raw in describe_instances(region, states)), key=sort_key)
 
 
-def _field(label: str, value: str, style: str = "") -> None:
-    """Print one indented 'label  value' line."""
-    text = escape(value) if value else f"[dim]{NOT_SET}[/]"
-    if style and value:
-        text = f"[{style}]{text}[/]"
-    console.print(f"  [dim]{label:<{LABEL_WIDTH}}[/]{text}")
+def print_instance_heading(instance: Ec2Instance) -> None:
+    """Print the coloured state dot and the instance name."""
+    style = STATE_STYLES.get(instance.state, "white")
+    name = escape(instance.name) if instance.name else "[dim](no name)[/]"
+    console.print(f"[{style}]●[/] [bold]{name}[/]")
+
+
+def state_summary(instances: Iterable[Ec2Instance]) -> str:
+    """Return e.g. '2 running, 1 stopped'."""
+    counts = Counter(instance.state for instance in instances)
+    return ", ".join(f"{count} {state}" for state, count in counts.most_common())
 
 
 def print_instances(instances: list[Ec2Instance], region: str) -> None:
     """Print instances as readable blocks: a header line, then one block per instance."""
-    counts = Counter(instance.state for instance in instances)
-    summary = ", ".join(f"{count} {state}" for state, count in counts.most_common())
-
-    console.print()
-    console.print(
-        f"[bold]EC2 instances[/] [dim]·[/] {escape(region)} [dim]·[/] {len(instances)} found"
-        + (f" [dim]({summary})[/]" if summary else "")
-    )
-    console.print()
+    print_header("EC2 instances", region, len(instances), state_summary(instances))
 
     if not instances:
         console.print("  [dim]No instances match the selected states.[/]")
@@ -121,12 +120,10 @@ def print_instances(instances: list[Ec2Instance], region: str) -> None:
         return
 
     for instance in instances:
-        style = STATE_STYLES.get(instance.state, "white")
-        name = escape(instance.name) if instance.name else "[dim](no name)[/]"
-        console.print(f"[{style}]●[/] [bold]{name}[/]")
-        _field("Instance ID", instance.instance_id)
-        _field("Status", instance.state, style)
-        _field("VPC", instance.vpc_id)
-        _field("Public IP", instance.public_ip)
-        _field("Private IP", instance.private_ip)
+        print_instance_heading(instance)
+        field("Instance ID", instance.instance_id)
+        field("Status", instance.state, STATE_STYLES.get(instance.state, ""))
+        field("VPC", instance.vpc_id)
+        field("Public IP", instance.public_ip)
+        field("Private IP", instance.private_ip)
         console.print()

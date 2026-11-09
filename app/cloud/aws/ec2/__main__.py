@@ -8,6 +8,8 @@ Usage:
     python -m app.cloud.aws.ec2 run                          # analysis, 30d window (production)
     python -m app.cloud.aws.ec2 run 90d                      # analysis, 90d window (production)
     python -m app.cloud.aws.ec2 run 1h                       # analysis, 1h window (testing)
+    python -m app.cloud.aws.ec2 metrics                      # stored CPU/memory summary, 30d
+    python -m app.cloud.aws.ec2 metrics 1d -r i-0abc123 -H   # one instance, every hourly average
     python -m app.cloud.aws.ec2 history -r i-0abc123         # stored changes of one instance
     python -m app.cloud.aws.ec2 run 7d --region eu-west-1    # another region
 """
@@ -23,8 +25,10 @@ from app.cloud.aws.ec2.analysis import (
     ANALYSIS_WINDOWS,
     DEFAULT_WINDOW,
     get_history,
+    get_stored_metrics,
     print_analysis,
     print_history,
+    print_stored_metrics,
     run_analysis,
 )
 from app.cloud.aws.ec2.configuration import get_configurations, print_configurations
@@ -45,6 +49,11 @@ def _run_configuration(args: argparse.Namespace, region: str) -> None:
 
 def _run_analysis(args: argparse.Namespace, region: str) -> None:
     print_analysis(run_analysis(args.window, region))
+
+
+def _run_metrics(args: argparse.Namespace, region: str) -> None:
+    names, metrics = get_stored_metrics(args.window, region, args.resource)
+    print_stored_metrics(names, metrics, region, args.window, args.hourly)
 
 
 def _run_history(args: argparse.Namespace, region: str) -> None:
@@ -113,13 +122,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     config_cmd.set_defaults(run=_run_configuration)
 
-    run_cmd = commands.add_parser(
-        "run",
-        aliases=["analyze"],
-        parents=[region_option],
-        help="run an analysis: store/compare configuration, report changes and readiness",
-    )
-    run_cmd.add_argument(
+    window_option = argparse.ArgumentParser(add_help=False)
+    window_option.add_argument(
         "window",
         nargs="?",
         default=DEFAULT_WINDOW,
@@ -127,7 +131,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="WINDOW",
         help=_window_help(),
     )
+
+    run_cmd = commands.add_parser(
+        "run",
+        aliases=["analyze"],
+        parents=[region_option, window_option],
+        help="run an analysis: collect configuration and hourly CPU/memory, store them, "
+        "report changes and readiness",
+    )
     run_cmd.set_defaults(run=_run_analysis)
+
+    metrics_cmd = commands.add_parser(
+        "metrics",
+        aliases=["usage"],
+        parents=[region_option, window_option],
+        help="show stored hourly CPU/memory averages (no CloudWatch calls)",
+    )
+    metrics_cmd.add_argument(
+        "-r", "--resource",
+        metavar="ID_OR_NAME",
+        help="only one instance, by ID (i-...) or Name tag",
+    )
+    metrics_cmd.add_argument(
+        "-H", "--hourly",
+        action="store_true",
+        help="also list every hourly average",
+    )
+    metrics_cmd.set_defaults(run=_run_metrics)
 
     history_cmd = commands.add_parser(
         "history",

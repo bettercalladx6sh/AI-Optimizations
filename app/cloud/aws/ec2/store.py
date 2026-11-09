@@ -2,11 +2,13 @@
 
 Each instance is stored as a generic resource (resources, resource_snapshots,
 resource_tags, resource_changes via app.db.resources) plus EC2-specific typed rows
-(ec2_instances, ec2_volumes) for querying its current configuration.
+(ec2_instances, ec2_volumes) for querying its current configuration, and its hourly
+CPU and memory averages (ec2_metric_datapoints, ec2_metric_collections).
 """
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import asdict
 from datetime import datetime
 from typing import Any
@@ -15,8 +17,9 @@ from pymysql.connections import Connection
 
 from app.cloud.aws.ec2.changes import FieldChange, InstanceChange, InstanceSnapshot
 from app.cloud.aws.ec2.configuration import InstanceConfiguration
+from app.cloud.aws.ec2.metrics import METRICS_BY_KEY, PERIOD, STATISTIC, Datapoint, MetricSeries
 from app.db import resources
-from app.db.resources import ChangeRecord, StoredResource, to_db, to_json
+from app.db.resources import ChangeRecord, StoredResource, from_db, to_db, to_json
 
 PROVIDER = "aws"
 SERVICE = "ec2"
@@ -149,3 +152,95 @@ def to_instance_change(record: ChangeRecord) -> InstanceChange:
         after=InstanceSnapshot.from_dict(record.after) if record.after else None,
         fields=tuple(FieldChange(item["field"], item["before"], item["after"]) for item in record.field_changes),
     )
+
+
+def save_metrics(
+    connection: Connection,
+    resource: int,
+    run_id: int,
+    collected_at: datetime,
+    series: list[MetricSeries],
+) -> None:
+    """Store hourly averages (one row per instance, metric and hour) and what this run collected.
+
+    Hours already stored by an earlier run are updated, never duplicated.
+    """
+    period_seconds = int(PERIOD.total_seconds())
+    with connection.cursor() as cursor:
+        rows = [
+            (resource, item.metric.key, to_db(point.period_start), period_seconds, point.average,
+             item.metric.unit, run_id, to_db(collected_at))
+            for item in series
+            for point in item.datapoints
+        ]
+        if rows:
+            cursor.executemany(
+                "INSERT INTO ec2_metric_datapoints (resource_ref, metric, period_start, period_seconds, "
+                "average, unit, run_id, collected_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) AS new "
+                "ON DUPLICATE KEY UPDATE average = new.average, run_id = new.run_id, collected_at = new.collected_at",
+                rows,
+            )
+        cursor.executemany(
+            "INSERT INTO ec2_metric_collections (run_id, resource_ref, metric, namespace, metric_name, statistic, "
+            "period_seconds, window_start, window_end, expected_points, collected_points) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            [
+                (run_id, resource, item.metric.key, item.metric.namespace, item.metric.metric_name, STATISTIC,
+                 period_seconds, to_db(item.window_start), to_db(item.window_end),
+                 item.expected_points, item.collected_points)
+                for item in series
+            ],
+        )
+
+
+def load_metrics(
+    connection: Connection,
+    instance_scope: resources.Scope,
+    window_start: datetime,
+    window_end: datetime,
+    resource_filter: str | None = None,
+) -> tuple[dict[str, str], list[MetricSeries]]:
+    """Read stored hourly averages for the window.
+
+    Returns ({instance ID: name}, series) for instances that still exist and are not
+    terminated, optionally one instance by ID or name. Every instance gets a series per
+    metric, even with no data.
+    """
+    query = (
+        "SELECT resource_id, COALESCE(name, '') FROM resources "
+        "WHERE account_ref = %s AND region = %s AND service = %s AND resource_type = %s "
+        "AND removed_at IS NULL AND COALESCE(state, '') <> 'terminated'"
+    )
+    params: list[Any] = [instance_scope.account_ref, instance_scope.region, instance_scope.service,
+                         instance_scope.resource_type]
+    if resource_filter:
+        query += " AND (resource_id = %s OR name = %s)"
+        params += [resource_filter, resource_filter]
+
+    with connection.cursor() as cursor:
+        cursor.execute(query, params)
+        names = dict(cursor.fetchall())
+        if not names:
+            return {}, []
+        placeholders = ", ".join(["%s"] * len(names))
+        cursor.execute(
+            "SELECT r.resource_id, d.metric, d.period_start, d.average "
+            "FROM ec2_metric_datapoints d JOIN resources r ON r.id = d.resource_ref "
+            "WHERE r.account_ref = %s AND r.region = %s AND r.service = %s AND r.resource_type = %s "
+            f"AND r.resource_id IN ({placeholders}) AND d.period_start >= %s AND d.period_start < %s "
+            "ORDER BY d.period_start",
+            [instance_scope.account_ref, instance_scope.region, instance_scope.service,
+             instance_scope.resource_type, *names, to_db(window_start), to_db(window_end)],
+        )
+        rows = cursor.fetchall()
+
+    points: dict[tuple[str, str], list[Datapoint]] = defaultdict(list)
+    for instance_id, metric_key, period_start, average in rows:
+        points[(instance_id, metric_key)].append(Datapoint(from_db(period_start), average))
+
+    series = [
+        MetricSeries(instance_id, metric, window_start, window_end, tuple(points[(instance_id, metric.key)]))
+        for instance_id in sorted(names)
+        for metric in METRICS_BY_KEY.values()
+    ]
+    return names, series

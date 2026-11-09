@@ -4,22 +4,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
-from pathlib import Path
 
 import boto3
 from botocore.client import BaseClient
 from botocore.exceptions import BotoCoreError, ClientError
-from dotenv import dotenv_values
-from rich.console import Console
-from rich.markup import escape
 
-console = Console()
+from app.auth.common import ENV_PATH, AuthError, mask, read_env, status
 
-ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 REQUIRED_VARS = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_DEFAULT_REGION")
 
 
-class AWSAuthError(Exception):
+class AWSAuthError(AuthError):
     """Raised when AWS credentials are missing, invalid or unreachable."""
 
 
@@ -38,30 +33,9 @@ class AWSIdentity:
         return resource.split("/", 1)[-1]
 
 
-def _status(ok: bool, message: str) -> None:
-    """Print a single status line with a green tick or red cross."""
-    mark = "[bold green]✔[/]" if ok else "[bold red]✘[/]"
-    console.print(f"{mark} {escape(message)}")
-
-
-def mask(value: str, head: int = 4, tail: int = 4) -> str:
-    """Hide a secret, keeping only a few leading and trailing characters."""
-    if len(value) <= head + tail:
-        return "*" * len(value)
-    return f"{value[:head]}{'*' * 8}{value[-tail:]}"
-
-
-def load_env(env_path: Path = ENV_PATH) -> dict[str, str]:
-    """Read and validate the required AWS settings from the .env file."""
-    if not env_path.is_file():
-        raise AWSAuthError(f".env not found at {env_path}")
-
-    values = dotenv_values(env_path)
-    missing = [var for var in REQUIRED_VARS if not values.get(var)]
-    if missing:
-        raise AWSAuthError(f"missing in .env: {', '.join(missing)}")
-
-    return {var: values[var] for var in REQUIRED_VARS}
+def load_env() -> dict[str, str]:
+    """Read and validate the AWS settings from .env."""
+    return read_env(REQUIRED_VARS, AWSAuthError)
 
 
 @lru_cache(maxsize=1)
@@ -101,12 +75,12 @@ def authenticate() -> AWSIdentity:
     try:
         env = load_env()
     except AWSAuthError as exc:
-        _status(False, f"Verifying .env: {exc}")
-        _status(False, "Authentication failed")
+        status(False, f"Verifying .env: {exc}")
+        status(False, "Authentication failed")
         raise
-    _status(True, f"Verifying .env ({ENV_PATH})")
+    status(True, f"Verifying .env ({ENV_PATH})")
 
-    _status(
+    status(
         True,
         f"Access key [{mask(env['AWS_ACCESS_KEY_ID'])}]  "
         f"Secret key [{mask(env['AWS_SECRET_ACCESS_KEY'], head=0)}]  "
@@ -116,11 +90,11 @@ def authenticate() -> AWSIdentity:
     try:
         identity = get_identity()
     except AWSAuthError as exc:
-        _status(False, "Name: unavailable")
-        _status(False, f"Authentication failed: {exc}")
+        status(False, "Name: unavailable")
+        status(False, f"Authentication failed: {exc}")
         raise
-    _status(True, f"Name: {identity.name} (account {identity.account_id})")
-    _status(True, "Authentication successful")
+    status(True, f"Name: {identity.name} (account {identity.account_id})")
+    status(True, "Authentication successful")
 
     return identity
 
@@ -132,5 +106,3 @@ def main() -> int:
     except AWSAuthError:
         return 1
     return 0
-
-

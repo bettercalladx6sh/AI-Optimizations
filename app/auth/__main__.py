@@ -4,6 +4,8 @@ Usage:
     python -m app.auth            # all providers
     python -m app.auth aws        # AWS only
     python -m app.auth azure      # Azure only
+    python -m app.auth mysql      # company UAT database (read-only)
+    python -m app.auth analysis-db  # local analysis store (docker compose)
 """
 
 import sys
@@ -17,6 +19,7 @@ PROVIDERS = {
     "aws": aws_auth.main,
     "azure": azure_auth.main,
     "mysql": mysql_auth.main,
+    "analysis-db": lambda: mysql_auth.main(mysql_auth.ANALYSIS),
     "opensearch": opensearch_auth.main,
 }
 

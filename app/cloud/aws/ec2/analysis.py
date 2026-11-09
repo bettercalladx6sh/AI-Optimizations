@@ -167,7 +167,7 @@ def _store_run(
             before_id = entry.current_snapshot_id if entry and change.kind == "modified" else None
             store.record_change(connection, resource, run_id, now, change, before_id, snapshot_id)
         if instance_id in metrics:
-            store.save_metrics(connection, resource, run_id, now, metrics[instance_id])
+                        store.save_metrics(connection, resource, snapshot.name, run_id, now, metrics[instance_id])
 
     for change in changes:
         if change.kind == "removed":

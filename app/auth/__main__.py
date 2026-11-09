@@ -10,11 +10,15 @@ import sys
 
 from rich.markup import escape
 
-from app.auth import aws_auth, azure_auth, mysql_auth
+from app.auth import aws_auth, azure_auth, mysql_auth, opensearch_auth
 from app.auth.common import console
 
-PROVIDERS = {"aws": aws_auth.main, "azure": azure_auth.main, "mysql": mysql_auth.main}
-
+PROVIDERS = {
+    "aws": aws_auth.main,
+    "azure": azure_auth.main,
+    "mysql": mysql_auth.main,
+    "opensearch": opensearch_auth.main,
+}
 
 def run(selected: list[str]) -> int:
     """Run the selected provider checks and return the worst exit code."""

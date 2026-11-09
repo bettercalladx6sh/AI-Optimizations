@@ -1,19 +1,6 @@
 """Authentication package: shared cloud provider connectivity."""
 
-from app.auth.aws_auth import (
-    AWSAuthError,
-    AWSIdentity,
-    authenticate,
-    get_client,
-    get_identity,
-    get_session,
-)
+from app.auth import aws_auth, azure_auth
+from app.auth.common import AuthError
 
-__all__ = [
-    "AWSAuthError",
-    "AWSIdentity",
-    "authenticate",
-    "get_client",
-    "get_identity",
-    "get_session",
-]
+__all__ = ["AuthError", "aws_auth", "azure_auth"]

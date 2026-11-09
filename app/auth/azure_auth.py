@@ -25,7 +25,7 @@ from azure.mgmt.resource.resources import ResourceManagementClient
 from azure.mgmt.resource.subscriptions import SubscriptionClient
 from rich.table import Table
 
-from app.auth.common import ENV_PATH, AuthError, console, hint, mask, read_env, status
+from app.auth.common import ENV_PATH, AuthError, console, mask, read_env, report_failure, status
 
 # The Azure SDK logs every failed attempt; status lines report errors instead.
 logging.getLogger("azure").setLevel(logging.ERROR)

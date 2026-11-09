@@ -60,3 +60,9 @@ def read_env(
     for var, default in (optional or {}).items():
         env[var] = (values.get(var) or default).strip()
     return env
+
+def report_failure(step: str, exc: AuthError) -> None:
+    """Print a failed step, its fix hints and the final failure line."""
+    status(False, f"{step}: {exc}")
+    hint(exc.hints)
+    status(False, "Authentication failed")

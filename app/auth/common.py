@@ -66,3 +66,7 @@ def report_failure(step: str, exc: AuthError) -> None:
     status(False, f"{step}: {exc}")
     hint(exc.hints)
     status(False, "Authentication failed")
+
+def warning(message: str) -> None:
+    """Print a single status line with a yellow warning sign."""
+    console.print(f"[bold yellow]⚠[/] {escape(message)}")

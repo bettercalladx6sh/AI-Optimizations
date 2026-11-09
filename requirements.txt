@@ -1,0 +1,8 @@
+# AI Cost Optimizer - dependencies
+# Install: pip install -r requirements.txt
+
+# Load environment variables from .env
+python-dotenv>=1.0.1,<2.0.0
+
+# Formatted console output and logging
+rich>=13.7.0,<15.0.0

@@ -21,3 +21,9 @@ azure-mgmt-resource-subscriptions>=1.0.0,<2.0.0
 
 # MySQL driver (rsa extra: MySQL 8 caching_sha2_password auth)
 PyMySQL[rsa]>=1.1.0,<2.0.0
+
+# OpenSearch client
+opensearch-py>=3.0.0,<4.0.0
+
+# HTTP library (used directly to silence TLS warnings when cert checks are off)
+urllib3>=2.0.0,<3.0.0

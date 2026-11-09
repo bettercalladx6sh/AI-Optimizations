@@ -18,3 +18,6 @@ azure-mgmt-resource>=26.0.0,<27.0.0
 
 # Azure subscriptions (split from azure-mgmt-resource in 26.0.0)
 azure-mgmt-resource-subscriptions>=1.0.0,<2.0.0
+
+# MySQL driver (rsa extra: MySQL 8 caching_sha2_password auth)
+PyMySQL[rsa]>=1.1.0,<2.0.0

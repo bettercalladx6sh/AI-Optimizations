@@ -8,6 +8,7 @@ from app.cloud.aws.ec2.configuration import (
     print_configurations,
 )
 from app.cloud.aws.ec2.instances import Ec2Instance, list_instances, print_instances
+from app.cloud.aws.ec2.metrics import METRICS, MetricSeries, collect_metrics
 
 __all__ = [
     "ANALYSIS_WINDOWS",
@@ -16,6 +17,9 @@ __all__ = [
     "InstanceChange",
     "InstanceConfiguration",
     "InstanceSnapshot",
+    "METRICS",
+    "MetricSeries",
+    "collect_metrics",
     "compare",
     "get_configurations",
     "list_instances",

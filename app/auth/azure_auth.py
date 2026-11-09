@@ -173,11 +173,6 @@ def _masked_or(value: str, fallback: str) -> str:
     return mask(value) if value else fallback
 
 
-def _report_failure(step: str, exc: AuthError) -> None:
-    status(False, f"{step}: {exc}")
-    hint(exc.hints)
-    status(False, "Authentication failed")
-
 
 def _print_resource_groups(groups: list[tuple[str, str]]) -> None:
     table = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
@@ -193,7 +188,7 @@ def authenticate() -> AzureIdentity:
     try:
         env = load_env()
     except AzureAuthError as exc:
-        _report_failure("Verifying .env", exc)
+        report_failure("Verifying .env", exc)
         raise
     status(True, f"Verifying .env ({ENV_PATH})")
 
@@ -207,21 +202,21 @@ def authenticate() -> AzureIdentity:
     try:
         source = credential_source()
     except AzureAuthError as exc:
-        _report_failure("Credential", exc)
+        report_failure("Credential", exc)
         raise
     status(True, f"Credential: {source}")
 
     try:
         identity = get_identity()
     except AzureAuthError as exc:
-        _report_failure("Subscription access", exc)
+        report_failure("Subscription access", exc)
         raise
     status(True, f"Name: {identity.name} ({identity.state})")
 
     try:
         groups = list_resource_groups()
     except AzureAuthError as exc:
-        _report_failure("Resource groups", exc)
+        report_failure("Resource groups", exc)
         raise
     status(True, f"Resource groups: {len(groups)} found")
     if groups:

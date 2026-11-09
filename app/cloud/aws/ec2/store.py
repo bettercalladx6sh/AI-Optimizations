@@ -153,45 +153,48 @@ def to_instance_change(record: ChangeRecord) -> InstanceChange:
         fields=tuple(FieldChange(item["field"], item["before"], item["after"]) for item in record.field_changes),
     )
 
-
 def save_metrics(
     connection: Connection,
     resource: int,
+    instance_name: str,
     run_id: int,
     collected_at: datetime,
     series: list[MetricSeries],
 ) -> None:
     """Store hourly averages (one row per instance, metric and hour) and what this run collected.
 
-    Hours already stored by an earlier run are updated, never duplicated.
+    Each row carries the instance ID and its current Name tag. Hours already stored by an
+    earlier run are updated (including the name), never duplicated.
     """
     period_seconds = int(PERIOD.total_seconds())
+    name = instance_name or None
     with connection.cursor() as cursor:
         rows = [
-            (resource, item.metric.key, to_db(point.period_start), period_seconds, point.average,
-             item.metric.unit, run_id, to_db(collected_at))
+            (resource, item.instance_id, name, item.metric.key, to_db(point.period_start), period_seconds,
+             point.average, item.metric.unit, run_id, to_db(collected_at))
             for item in series
             for point in item.datapoints
         ]
         if rows:
             cursor.executemany(
-                "INSERT INTO ec2_metric_datapoints (resource_ref, metric, period_start, period_seconds, "
-                "average, unit, run_id, collected_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) AS new "
-                "ON DUPLICATE KEY UPDATE average = new.average, run_id = new.run_id, collected_at = new.collected_at",
+                "INSERT INTO ec2_metric_datapoints (resource_ref, instance_id, instance_name, metric, period_start, "
+                "period_seconds, average, unit, run_id, collected_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) AS new "
+                "ON DUPLICATE KEY UPDATE instance_name = new.instance_name, average = new.average, "
+                "run_id = new.run_id, collected_at = new.collected_at",
                 rows,
             )
         cursor.executemany(
-            "INSERT INTO ec2_metric_collections (run_id, resource_ref, metric, namespace, metric_name, statistic, "
-            "period_seconds, window_start, window_end, expected_points, collected_points) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            "INSERT INTO ec2_metric_collections (run_id, resource_ref, instance_id, instance_name, metric, namespace, "
+            "metric_name, statistic, period_seconds, window_start, window_end, expected_points, collected_points) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             [
-                (run_id, resource, item.metric.key, item.metric.namespace, item.metric.metric_name, STATISTIC,
-                 period_seconds, to_db(item.window_start), to_db(item.window_end),
-                 item.expected_points, item.collected_points)
+                (run_id, resource, item.instance_id, name, item.metric.key, item.metric.namespace,
+                 item.metric.metric_name, STATISTIC, period_seconds, to_db(item.window_start),
+                 to_db(item.window_end), item.expected_points, item.collected_points)
                 for item in series
             ],
         )
-
 
 def load_metrics(
     connection: Connection,

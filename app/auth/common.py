@@ -34,8 +34,9 @@ def read_env(
     required: tuple[str, ...],
     error: type[AuthError] = AuthError,
     env_path: Path = ENV_PATH,
+    optional: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    """Read and validate the required variables from the .env file."""
+    """Read required variables (and optional ones with defaults) from the .env file."""
     if not env_path.is_file():
         raise error(f".env not found at {env_path}")
 
@@ -44,4 +45,7 @@ def read_env(
     if missing:
         raise error(f"missing in .env: {', '.join(missing)}")
 
-    return {var: values[var] for var in required}
+    env = {var: values[var] for var in required}
+    for var, default in (optional or {}).items():
+        env[var] = values.get(var) or default
+    return env

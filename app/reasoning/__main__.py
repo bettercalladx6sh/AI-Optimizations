@@ -1,7 +1,7 @@
 """Cloudpositive AI Engine: EC2 rightsizing recommendations.
 
 Usage:
-    python -m app.reasoning                        # 30d: evidence pipeline, then AI reasoning
+    python -m app.reasoning                        # default window (app/config.py): pipeline, then AI
     python -m app.reasoning 7d                     # testing window
     python -m app.reasoning --no-ai                # rule-based decisions only (no OpenAI call)
     python -m app.reasoning -e evidence/aws/ec2/<account>/<region>/30d.json   # reuse evidence
@@ -52,12 +52,12 @@ def main(argv: list[str] | None = None) -> int:
         evidence = None
         if args.evidence:
             evidence = engine.load_evidence_file(args.evidence)
-            window, region = evidence["analysis_window"], evidence["source"]["region"]
+            label, region = render.window_label(evidence["analysis_window"]), evidence["source"]["region"]
         else:
             region = args.region or aws_auth.get_session().region_name
-            window = {"key": args.window, **{k: getattr(ANALYSIS_WINDOWS[args.window], k)
-                                               for k in ("purpose", "description")}}
-        render.print_title(window, region)
+            window = ANALYSIS_WINDOWS[args.window]
+            label = window.label(*window.bounds())
+        render.print_title(label, region)
         if evidence:
             steps("Load evidence file", f"{display_path(args.evidence)} · "
                                         f"{plural(len(evidence['instances']), 'instance')}")

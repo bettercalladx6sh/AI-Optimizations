@@ -27,6 +27,7 @@ from typing import Any, Callable
 from rich.markup import escape
 
 from app.auth.common import console
+from app.config import CPU_SAFETY_FACTOR, MEMORY_SAFETY_FACTOR, MIN_COVERAGE_PERCENT, MIN_EVIDENCE_HOURS
 from app.cloud.aws.ec2 import pipeline, pricing
 from app.cloud.aws.ec2.evidence import timestamp, validate_evidence
 from app.cloud.display import plural
@@ -34,14 +35,7 @@ from app.cloud.files import PROJECT_ROOT, display_path, write_json
 from app.cloud.schema import EvidenceValidationError, ValidationIssue, validate_document
 from app.reasoning import eligibility, sizing
 from app.reasoning.ai import AiReasoner
-from app.reasoning.config import (
-    CPU_SAFETY_FACTOR,
-    MEMORY_SAFETY_FACTOR,
-    MIN_COVERAGE_PERCENT,
-    MIN_EVIDENCE_HOURS,
-    ReasoningError,
-    ReasoningSettings,
-)
+from app.reasoning.config import ReasoningError, ReasoningSettings
 
 SCHEMA_VERSION = "1.0"
 SCHEMA_PATH = Path(__file__).resolve().parent / "schemas" / "ec2_recommendations.schema.json"
@@ -258,9 +252,9 @@ def _fetch_pricing(region: str, instances: list[dict[str, Any]],
 def decide(evidence: dict[str, Any], reasoner: AiReasoner | None,
            on_step: StepCallback) -> list[dict[str, Any]]:
     """Gate, size, price and (optionally) reason about every instance of the evidence."""
-    window_key, region = evidence["analysis_window"]["key"], evidence["source"]["region"]
+    window, region = evidence["analysis_window"], evidence["source"]["region"]
     instances = evidence["instances"]
-    gates = {instance["instance_id"]: eligibility.check(instance, window_key) for instance in instances}
+    gates = {instance["instance_id"]: eligibility.check(instance, window) for instance in instances}
     eligible = [instance for instance in instances if gates[instance["instance_id"]].eligible]
     on_step(REASONING_STEPS[0], f"{len(eligible)} of {plural(len(instances), 'instance')} have sufficient evidence")
 

@@ -1,4 +1,7 @@
-"""Reasoning settings: the AI provider credentials and the rightsizing policy thresholds."""
+"""Reasoning settings: the AI provider credentials and AI retry policy.
+
+Analysis windows, evidence thresholds and safety factors live in app/config.py.
+"""
 
 from __future__ import annotations
 
@@ -7,14 +10,6 @@ from dataclasses import dataclass
 from app.auth.common import AuthError, read_env
 
 DEFAULT_MODEL = "gpt-5.6-luna"
-
-# Evidence policy: an instance is evaluated only when every rule passes.
-MIN_COVERAGE_PERCENT = 90.0    # each metric must cover at least this share of the window hours
-MIN_EVIDENCE_HOURS = 1.0       # and at least this many hours, whatever the window
-
-# Capacity policy (same factors as the original capacity analysis).
-CPU_SAFETY_FACTOR = 1.25
-MEMORY_SAFETY_FACTOR = 1.25
 
 # AI output is validated; an invalid answer is retried with feedback up to this many times.
 MAX_AI_ATTEMPTS = 3

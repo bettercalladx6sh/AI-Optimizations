@@ -2,9 +2,10 @@
 
 An instance is evaluated only when every rule passes:
     1. it is running (a stopped instance produces no utilization evidence)
-    2. a full analysis window has passed since it was launched or its configuration changed
+    2. its current configuration covers the whole analysis window (the window holds no hour
+       from before its launch or last significant configuration change)
     3. CPU and memory each have datapoints covering at least MIN_COVERAGE_PERCENT of the
-       window and at least MIN_EVIDENCE_HOURS hours
+       window and at least MIN_EVIDENCE_HOURS hours (both in app/config.py)
 
 Otherwise the decision is INSUFFICIENT_DATA: no size is recommended and the user is told
 exactly what is missing and when to run the analysis again. Missing data is never treated
@@ -16,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from app.reasoning.config import MIN_COVERAGE_PERCENT, MIN_EVIDENCE_HOURS
+from app.config import MIN_COVERAGE_PERCENT, MIN_EVIDENCE_HOURS
 
 METRIC_LABELS = {"cpu_utilization": "CPU", "memory_utilization": "Memory"}
 
@@ -95,17 +96,18 @@ def _metric_reason(metric: MetricEvidence) -> str | None:
     return None
 
 
-def check(instance: dict[str, Any], window_key: str) -> Eligibility:
-    """Apply the evidence rules to one evidence instance."""
+def check(instance: dict[str, Any], window: dict[str, Any]) -> Eligibility:
+    """Apply the evidence rules to one evidence instance; `window` is the evidence analysis_window."""
     state = instance["state"]
     evaluation = instance["evaluation"]
+    span = f"{window['key']} window ({window['description']}, {window['hours']} hours)"
 
     if state != "running":
         return Eligibility(
             eligible=False,
             reasons=(f"Instance is {state}; utilization cannot be measured while it is not running.",),
             missing_evidence=("CPU and memory utilization while the instance is running",),
-            action=f"Start the instance, or exclude it; run the analysis again after a full {window_key} window.",
+            action="Start the instance, or exclude it, then run the analysis again.",
             eligible_after=None,
         )
 
@@ -115,10 +117,9 @@ def check(instance: dict[str, Any], window_key: str) -> Eligibility:
         return Eligibility(
             eligible=False,
             reasons=(
-                f"{since} at {evaluation['since']}; a full {window_key} window of evidence is required "
-                f"for the current configuration.",
+                f"{since} at {evaluation['since']}; the {span} still contains hours from before it.",
             ),
-            missing_evidence=(f"A full {window_key} window of evidence for the current configuration",),
+            missing_evidence=(f"Evidence for the current configuration covering the whole {span}",),
             action=f"Wait until {evaluation['ready_at']}, then run the analysis again.",
             eligible_after=evaluation["ready_at"],
         )

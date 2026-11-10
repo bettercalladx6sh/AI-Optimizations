@@ -7,6 +7,7 @@ from typing import Any
 from rich.markup import escape
 
 from app.auth.common import console
+from app.cloud.aws.ec2.windows import span_label
 from app.cloud.display import field, field_list, plural
 
 DECISIONS = {
@@ -19,10 +20,15 @@ DECISIONS = {
 DECIDED_BY = {"evidence_gate": "evidence gate", "rules": "rules only (--no-ai)", "ai": "AI reasoning"}
 
 
-def print_title(window: dict[str, Any], region: str) -> None:
+def window_label(window: dict[str, Any]) -> str:
+    """e.g. '30d · production · month to date · 9 days 8 h (224 hours)' from an evidence analysis_window."""
+    return span_label(window["key"], window["purpose"], window["description"], window["hours"])
+
+
+def print_title(label: str, region: str) -> None:
     console.print()
     console.print(f"[bold]Cloudpositive AI Engine[/] [dim]·[/] EC2 rightsizing [dim]·[/] {escape(region)} [dim]·[/] "
-                  f"{escape(window['key'])} · {escape(window['purpose'])} · {escape(window['description'])}")
+                  f"{escape(label)}")
     console.print()
 
 

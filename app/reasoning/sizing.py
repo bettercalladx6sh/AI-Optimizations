@@ -25,7 +25,7 @@ from functools import lru_cache
 from app.auth import aws_auth
 from app.cloud.aws.backoff import with_backoff
 from app.cloud.aws.errors import aws_errors
-from app.reasoning.config import CPU_SAFETY_FACTOR, MEMORY_SAFETY_FACTOR
+from app.config import CPU_SAFETY_FACTOR, MEMORY_SAFETY_FACTOR
 
 
 @dataclass(frozen=True)

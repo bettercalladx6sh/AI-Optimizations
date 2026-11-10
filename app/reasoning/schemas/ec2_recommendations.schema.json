@@ -39,7 +39,7 @@
       "additionalProperties": false,
       "required": ["key", "purpose", "description", "start", "end", "hours"],
       "properties": {
-        "key": {"enum": ["1h", "1d", "3d", "7d", "30d", "90d"]},
+        "key": {"type": "string", "pattern": "^[a-z0-9]{1,16}$", "description": "window key from app/config.py"},
         "purpose": {"enum": ["production", "testing"]},
         "description": {"type": "string", "minLength": 1},
         "start": {"$ref": "#/$defs/timestamp"},

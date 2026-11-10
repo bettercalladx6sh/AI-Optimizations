@@ -1,0 +1,7 @@
+{
+  "include": ["app"],
+  "venvPath": ".",
+  "venv": ".venv",
+  "extraPaths": ["."],
+  "executionEnvironments": [{ "root": "." }]
+}

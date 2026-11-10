@@ -68,7 +68,14 @@ def fetch_ingestion_module(module_name: str = DEFAULT_MODULE) -> IngestionModule
     if row is None:
         return None
     values = dict(zip(COLUMNS, row))
-    return IngestionModule(**{**values, "id": str(values["id"]), "is_active": bool(values["is_active"])})
+    return IngestionModule(
+        id=str(values["id"]),
+        module_name=values["module_name"],
+        description=values["description"],
+        is_active=bool(values["is_active"]),
+        created_at=values["created_at"],
+        updated_at=values["updated_at"],
+    )
 
 
 def _time(moment: datetime | None) -> str:

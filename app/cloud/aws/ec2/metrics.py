@@ -1,27 +1,28 @@
-"""EC2 utilization metrics from CloudWatch: hourly averages of CPU and memory.
-
-For every instance and metric, one datapoint per hour is collected: the average over that
-hour (24 datapoints per day, 720 for a 30d window). The window ends at the last complete
-hour, so a partial hour is never stored.
+"""EC2 utilization metrics from CloudWatch: definitions, planning and fetching of hourly averages.
 
     CPU     AWS/EC2     CPUUtilization     dimension InstanceId   (published by AWS)
     Memory  EC2/Custom  mem_used_percent   dimension InstanceId   (published by the CloudWatch agent)
+
+One datapoint per hour: the Average over that hour. Only settled hours are fetched, i.e. hours
+that ended at least SETTLE_DELAY ago, so a fetched average is final. Each hour is fetched at
+most once: hours already stored, or already checked in CloudWatch (even when it had no data),
+are never requested again.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
+from collections.abc import Iterable, Iterator, Mapping
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.auth import aws_auth
 from app.cloud.aws.errors import aws_errors
-from app.cloud.display import field
 
 PERIOD = timedelta(hours=1)
 STATISTIC = "Average"
+SETTLE_DELAY = timedelta(minutes=15)
 
 # CloudWatch GetMetricData limits per request.
 MAX_QUERIES_PER_CALL = 500
@@ -59,6 +60,9 @@ MEMORY = MetricDefinition(
 METRICS = (CPU, MEMORY)
 METRICS_BY_KEY = {metric.key: metric for metric in METRICS}
 
+SeriesKey = tuple[str, str]
+"""(instance ID, metric key)"""
+
 
 @dataclass(frozen=True)
 class Datapoint:
@@ -80,7 +84,7 @@ class MetricSeries:
 
     @property
     def expected_points(self) -> int:
-        return int((self.window_end - self.window_start) / PERIOD)
+        return len(hours(self.window_start, self.window_end))
 
     @property
     def collected_points(self) -> int:
@@ -99,20 +103,100 @@ class MetricSeries:
         return max((point.average for point in self.datapoints), default=None)
 
 
-def collection_window(duration: timedelta, now: datetime | None = None) -> tuple[datetime, datetime]:
-    """Return (start, end) ending at the last complete hour, e.g. 30d → 720 whole hours."""
-    end = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
-    return end - duration, end
+@dataclass(frozen=True)
+class Coverage:
+    """What is already known about one series: stored hours and hour ranges checked in CloudWatch."""
+
+    stored: frozenset[datetime] = frozenset()
+    checked: tuple[tuple[datetime, datetime], ...] = ()
+
+    def known(self, hour: datetime) -> bool:
+        return hour in self.stored or any(start <= hour < end for start, end in self.checked)
 
 
-def _query(query_id: str, instance_id: str, metric: MetricDefinition) -> dict[str, Any]:
+@dataclass(frozen=True)
+class FetchRequest:
+    """One span of hours to fetch for one instance and metric."""
+
+    instance_id: str
+    metric: MetricDefinition
+    start: datetime
+    end: datetime
+
+    @property
+    def key(self) -> SeriesKey:
+        return (self.instance_id, self.metric.key)
+
+    @property
+    def hours(self) -> int:
+        return len(hours(self.start, self.end))
+
+
+@dataclass
+class FetchResult:
+    """Datapoints returned by CloudWatch, and what it cost."""
+
+    points: dict[SeriesKey, tuple[Datapoint, ...]] = field(default_factory=dict)
+    api_calls: int = 0
+    queries: int = 0
+
+    @property
+    def datapoints(self) -> int:
+        return sum(len(points) for points in self.points.values())
+
+
+def floor_hour(moment: datetime) -> datetime:
+    return moment.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+
+
+def settled_end(now: datetime | None = None) -> datetime:
+    """End of the last hour whose average is final (ended at least SETTLE_DELAY ago)."""
+    return floor_hour((now or datetime.now(timezone.utc)) - SETTLE_DELAY)
+
+
+def hours(start: datetime, end: datetime) -> list[datetime]:
+    """Start of every whole hour in [start, end)."""
+    result, moment = [], floor_hour(start)
+    if moment < start:
+        moment += PERIOD
+    while moment < end:
+        result.append(moment)
+        moment += PERIOD
+    return result
+
+
+def missing_hours(start: datetime, end: datetime, coverage: Coverage) -> list[datetime]:
+    """Hours in the window that are neither stored nor already checked."""
+    return [hour for hour in hours(start, end) if not coverage.known(hour)]
+
+
+def plan_requests(
+    instance_ids: Iterable[str],
+    start: datetime,
+    end: datetime,
+    coverage: Mapping[SeriesKey, Coverage],
+) -> list[FetchRequest]:
+    """One request per instance and metric that has missing hours, spanning those hours.
+
+    Series with nothing missing are not requested at all.
+    """
+    requests = []
+    for instance_id in sorted(set(instance_ids)):
+        for metric in METRICS:
+            missing = missing_hours(start, end, coverage.get((instance_id, metric.key), Coverage()))
+            if missing:
+                requests.append(FetchRequest(instance_id, metric, missing[0], missing[-1] + PERIOD))
+    return requests
+
+
+def _query(query_id: str, request: FetchRequest) -> dict[str, Any]:
     return {
         "Id": query_id,
         "MetricStat": {
             "Metric": {
-                "Namespace": metric.namespace,
-                "MetricName": metric.metric_name,
-                "Dimensions": [{"Name": "InstanceId", "Value": instance_id}],
+                "Namespace": request.metric.namespace,
+                "MetricName": request.metric.metric_name,
+                "Dimensions": [{"Name": "InstanceId", "Value": request.instance_id}],
             },
             "Period": int(PERIOD.total_seconds()),
             "Stat": STATISTIC,
@@ -126,50 +210,46 @@ def _batches(items: list[Any], size: int) -> Iterator[list[Any]]:
         yield items[start:start + size]
 
 
-def collect_metrics(
-    instance_ids: Iterable[str],
-    duration: timedelta,
-    region: str | None = None,
-    now: datetime | None = None,
-) -> list[MetricSeries]:
-    """Collect hourly CPU and memory averages for each instance over the window.
+def fetch(requests: Iterable[FetchRequest], region: str | None = None) -> FetchResult:
+    """Fetch the requested spans with as few GetMetricData calls as possible.
 
-    Queries are batched to stay within GetMetricData limits; every page is read.
+    Requests with the same span share calls; each call stays within the query and
+    datapoint limits, and every page is read. No requests means no calls.
     """
-    start, end = collection_window(duration, now)
-    ids = sorted(set(instance_ids))
-    targets = {f"q{index}": (instance_id, metric) for index, (instance_id, metric) in
-               enumerate((iid, metric) for iid in ids for metric in METRICS)}
-    queries = [_query(query_id, iid, metric) for query_id, (iid, metric) in targets.items()]
+    by_span: dict[tuple[datetime, datetime], list[FetchRequest]] = defaultdict(list)
+    for request in requests:
+        by_span[(request.start, request.end)].append(request)
 
-    expected = max(int(duration / PERIOD), 1)
-    batch_size = max(1, min(MAX_QUERIES_PER_CALL, MAX_DATAPOINTS_PER_CALL // expected))
-    values: dict[str, dict[datetime, float]] = defaultdict(dict)
+    result = FetchResult()
+    if not by_span:
+        return result
 
-    client = aws_auth.get_client("cloudwatch", region=region)
-    paginator = client.get_paginator("get_metric_data")
-    for batch in _batches(queries, batch_size):
-        with aws_errors("cloudwatch:GetMetricData"):
-            for page in paginator.paginate(
-                MetricDataQueries=batch, StartTime=start, EndTime=end, ScanBy="TimestampAscending"
-            ):
-                for result in page["MetricDataResults"]:
-                    for timestamp, value in zip(result["Timestamps"], result["Values"]):
-                        values[result["Id"]][timestamp.astimezone(timezone.utc)] = value
-
-    return [
-        MetricSeries(
-            instance_id=instance_id,
-            metric=metric,
-            window_start=start,
-            window_end=end,
-            datapoints=tuple(
-                Datapoint(moment, average) for moment, average in sorted(values[query_id].items())
-                if start <= moment < end
-            ),
-        )
-        for query_id, (instance_id, metric) in targets.items()
-    ]
+    paginator = aws_auth.get_client("cloudwatch", region=region).get_paginator("get_metric_data")
+    for (start, end), span_requests in sorted(by_span.items()):
+        span_hours = max(len(hours(start, end)), 1)
+        batch_size = max(1, min(MAX_QUERIES_PER_CALL, MAX_DATAPOINTS_PER_CALL // span_hours))
+        for batch in _batches(span_requests, batch_size):
+            targets = {f"q{index}": request for index, request in enumerate(batch)}
+            values: dict[str, dict[datetime, float]] = defaultdict(dict)
+            with aws_errors("cloudwatch:GetMetricData"):
+                for page in paginator.paginate(
+                    MetricDataQueries=[_query(query_id, request) for query_id, request in targets.items()],
+                    StartTime=start,
+                    EndTime=end,
+                    ScanBy="TimestampAscending",
+                ):
+                    result.api_calls += 1
+                    for item in page["MetricDataResults"]:
+                        for timestamp, value in zip(item["Timestamps"], item["Values"]):
+                            values[item["Id"]][timestamp.astimezone(timezone.utc)] = value
+            result.queries += len(batch)
+            for query_id, request in targets.items():
+                result.points[request.key] = tuple(
+                    Datapoint(moment, average)
+                    for moment, average in sorted(values[query_id].items())
+                    if start <= moment < end
+                )
+    return result
 
 
 def by_instance(series: Iterable[MetricSeries]) -> dict[str, list[MetricSeries]]:
@@ -179,20 +259,3 @@ def by_instance(series: Iterable[MetricSeries]) -> dict[str, list[MetricSeries]]
         grouped[item.instance_id].append(item)
     order = {metric.key: index for index, metric in enumerate(METRICS)}
     return {iid: sorted(items, key=lambda s: order[s.metric.key]) for iid, items in grouped.items()}
-
-
-def summary_line(series: MetricSeries) -> str:
-    """Return e.g. 'avg 12.4% · peak 45.1% · 720/720 hours'."""
-    hours = f"{series.collected_points}/{series.expected_points} hours"
-    if series.average is None:
-        return f"{series.metric.missing_hint} · {hours}"
-    coverage = series.collected_points / series.expected_points if series.expected_points else 1
-    note = f" ({coverage:.1%})" if coverage < 1 else ""
-    return f"avg {series.average:.1f}% · peak {series.peak:.1f}% · {hours}{note}"
-
-
-def print_series_summary(series: Iterable[MetricSeries], indent: int = 4) -> None:
-    """Print one line per metric: average, peak hourly average and hours collected."""
-    for item in series:
-        style = "" if item.average is not None else "yellow"
-        field(item.metric.label, summary_line(item), style, indent=indent)

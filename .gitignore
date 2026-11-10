@@ -178,3 +178,6 @@ pyrightconfig.json
 
 # Generated evidence documents (may contain account details)
 evidence/
+
+# Generated rightsizing recommendations (may contain account details)
+recommendations/

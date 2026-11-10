@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from rich.markup import escape
 
@@ -53,6 +53,19 @@ def field_list(label: str, values: Iterable[object], indent: int = 2) -> None:
 def plural(count: int, word: str, many: str | None = None) -> str:
     """Return e.g. '1 hour', '24 hours', or with an irregular form '2 queries'."""
     return f"{count} {word if count == 1 else many or word + 's'}"
+
+def format_duration(delta: timedelta) -> str:
+    """Return e.g. '9 days 8 h', '1 day', '5 h 10 min', '45 min' (rounded down to minutes)."""
+    minutes = max(int(delta.total_seconds() // 60), 0)
+    days, minutes = divmod(minutes, 24 * 60)
+    hours, minutes = divmod(minutes, 60)
+    parts = [f"{days} day{'s' if days != 1 else ''}"] if days else []
+    if hours:
+        parts.append(f"{hours} h")
+    if minutes and not days:
+        parts.append(f"{minutes} min")
+    return " ".join(parts) or "0 min"
+
 
 def format_time(moment: datetime | None) -> str:
     """Return e.g. '2026-11-10 07:00 UTC', or an empty string."""

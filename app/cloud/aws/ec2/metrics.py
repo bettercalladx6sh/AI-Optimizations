@@ -17,12 +17,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from app import config
 from app.auth import aws_auth
 from app.cloud.aws.errors import aws_errors
 
 PERIOD = timedelta(hours=1)
 STATISTIC = "Average"
-SETTLE_DELAY = timedelta(minutes=15)
+SETTLE_DELAY = timedelta(minutes=config.SETTLE_DELAY_MINUTES)
 
 # CloudWatch GetMetricData limits per request.
 MAX_QUERIES_PER_CALL = 500

@@ -33,13 +33,13 @@
       "additionalProperties": false,
       "required": ["key", "purpose", "description", "start", "end", "hours", "required_stable_days"],
       "properties": {
-        "key": { "enum": ["1h", "1d", "3d", "7d", "30d", "90d"] },
+        "key": { "type": "string", "pattern": "^[a-z0-9]{1,16}$", "description": "window key from app/config.py" },
         "purpose": { "enum": ["production", "testing"] },
         "description": { "type": "string", "minLength": 1 },
         "start": { "$ref": "#/$defs/timestamp" },
         "end": { "$ref": "#/$defs/timestamp" },
         "hours": { "type": "integer", "minimum": 0 },
-        "required_stable_days": { "type": "number", "exclusiveMinimum": 0 }
+        "required_stable_days": { "type": "number", "minimum": 0, "description": "real span of the window in days; the current configuration must cover all of it" }
       }
     },
     "metric_definitions": {

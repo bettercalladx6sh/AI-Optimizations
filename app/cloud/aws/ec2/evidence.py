@@ -4,7 +4,8 @@ The document is the input for AI evaluation and rightsizing decisions. It contai
 instance (terminated ones excluded):
     configuration   specs of the current configuration version (type, vCPU, memory, storage, ...)
     changes         configuration changes detected in this run
-    evaluation      whether a full window has passed since the last launch or change
+    evaluation      whether the current configuration covers the whole window (no hour from
+                    before the last launch or change), and when it will if not
     metrics         per metric: hours available in the window, cumulative statistics since the
                     current configuration took effect, and the data status
     data_quality    issues the evaluation must take into account (missing memory metric, ...)
@@ -24,6 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from app import config
 from app.cloud.aws.ec2.analysis import AnalysisResult, Readiness
 from app.cloud.aws.ec2.changes import InstanceChange, configuration_version
 from app.cloud.aws.ec2.configuration import InstanceConfiguration
@@ -35,16 +37,14 @@ from app.cloud.schema import ValidationIssue, validate_document
 SCHEMA_VERSION = "1.0"
 SCHEMA_PATH = Path(__file__).resolve().parent / "schemas" / "ec2_evidence.schema.json"
 
-LOW_COVERAGE_PERCENT = 90.0
-MIN_EVIDENCE_HOURS = 24
 TOLERANCE = 1e-6
 
 ISSUE_MESSAGES = {
     "METRIC_MISSING": "{label} metric has no datapoints ({hint})",
     "LOW_COVERAGE": "{label} has datapoints for only {coverage:.1f}% of the window hours",
     "LIMITED_HISTORY": "{label} has only {count} hours of evidence for the current configuration",
-    "RECENTLY_CHANGED": "configuration changed {since}; a full {window} window is needed before evaluation",
-    "RECENTLY_LAUNCHED": "launched {since}; a full {window} window is needed before evaluation",
+    "RECENTLY_CHANGED": "configuration changed {since}; evaluation waits until {ready_at}, when the {window} window holds no earlier hours",
+    "RECENTLY_LAUNCHED": "launched {since}; evaluation waits until {ready_at}, when the {window} window holds no earlier hours",
     "INSTANCE_STOPPED": "instance is {state}; utilization reflects only the hours it was running",
 }
 
@@ -181,9 +181,11 @@ def _issues(
     snapshot_state: str,
     evaluation: dict[str, Any],
     metrics: dict[str, Any],
-    window_key: str,
+    window_description: str,
+    window_hours: int,
 ) -> list[dict[str, str]]:
     issues = []
+    limited_history = min(config.LIMITED_HISTORY_HOURS, window_hours)
     for metric in METRICS:
         data = metrics[metric.key]
         label = metric.label
@@ -192,19 +194,19 @@ def _issues(
                 label=label, hint=metric.missing_hint)))
             continue
         coverage = data["window"]["coverage_percent"]
-        if coverage < LOW_COVERAGE_PERCENT:
+        if coverage < config.MIN_COVERAGE_PERCENT:
             issues.append(("LOW_COVERAGE", metric.key, ISSUE_MESSAGES["LOW_COVERAGE"].format(
                 label=label, coverage=coverage)))
         count = data["cumulative"]["datapoint_count"]
-        if count < MIN_EVIDENCE_HOURS:
+        if count < limited_history:
             issues.append(("LIMITED_HISTORY", metric.key, ISSUE_MESSAGES["LIMITED_HISTORY"].format(
                 label=label, count=count)))
     if not evaluation["ready"] and evaluation["reason"] in ("changed", "added"):
         issues.append(("RECENTLY_CHANGED", None, ISSUE_MESSAGES["RECENTLY_CHANGED"].format(
-            since=evaluation["since"], window=window_key)))
+            since=evaluation["since"], ready_at=evaluation["ready_at"], window=window_description)))
     if not evaluation["ready"] and evaluation["reason"] == "launched":
         issues.append(("RECENTLY_LAUNCHED", None, ISSUE_MESSAGES["RECENTLY_LAUNCHED"].format(
-            since=evaluation["since"], window=window_key)))
+            since=evaluation["since"], ready_at=evaluation["ready_at"], window=window_description)))
     if snapshot_state != "running":
         issues.append(("INSTANCE_STOPPED", None, ISSUE_MESSAGES["INSTANCE_STOPPED"].format(state=snapshot_state)))
     return [{"code": code, "metric": metric_key, "message": message} for code, metric_key, message in issues]
@@ -225,6 +227,7 @@ def build_evidence(result: AnalysisResult, generated_at: datetime | None = None)
     for change in result.changes:
         changes_by_id.setdefault(change.instance_id, []).append(change)
 
+    span = len(hours(report.start, report.end))
     instances = []
     for instance_id in sorted(readiness, key=lambda iid: (result.snapshots[iid].name.lower(), iid)):
         snapshot, config = result.snapshots[instance_id], result.configurations[instance_id]
@@ -240,11 +243,10 @@ def build_evidence(result: AnalysisResult, generated_at: datetime | None = None)
             "changes": _changes(changes_by_id.get(instance_id, [])),
             "evaluation": evaluation,
             "metrics": metrics,
-            "data_quality": {"issues": _issues(snapshot.state, evaluation, metrics, result.window.key)},
+            "data_quality": {"issues": _issues(snapshot.state, evaluation, metrics, result.window.description, span)},
         })
 
     states = Counter(instance["state"] for instance in instances)
-    span = len(hours(report.start, report.end))
     return {
         "schema_version": SCHEMA_VERSION,
         "evidence_id": str(uuid.uuid4()),
@@ -263,7 +265,7 @@ def build_evidence(result: AnalysisResult, generated_at: datetime | None = None)
             "start": timestamp(report.start),
             "end": timestamp(report.end),
             "hours": span,
-            "required_stable_days": round(result.window.duration.total_seconds() / 86400, 4),
+            "required_stable_days": round((report.end - report.start).total_seconds() / 86400, 4),
         },
         "metric_definitions": [
             {
@@ -324,6 +326,8 @@ def _consistency_issues(document: dict[str, Any]) -> list[ValidationIssue]:
         issues.append(ValidationIssue("$.analysis_window", "end is before start"))
     elif window["hours"] != round((end - start).total_seconds() / 3600):
         issues.append(ValidationIssue("$.analysis_window.hours", "does not match start and end"))
+    elif not math.isclose(window["required_stable_days"], window["hours"] / 24, abs_tol=1e-3):
+        issues.append(ValidationIssue("$.analysis_window.required_stable_days", "must equal the window span in days"))
 
     defined = {definition["key"] for definition in document["metric_definitions"]}
     for index, instance in enumerate(instances):

@@ -1,0 +1,220 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cost-optimizer.local/schemas/aws/ec2/recommendations/1.0",
+  "title": "EC2 rightsizing recommendations",
+  "description": "Rightsizing decisions for every instance of one evidence document: evidence sufficiency, required capacity, validated and priced candidate sizes, the decision, the recommended size (only for DOWNSIZE/UPSCALE), on-demand cost and savings, and the explanation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "report_id", "generated_at", "engine", "source", "analysis_window", "policy", "summary", "recommendations"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "report_id": {"$ref": "#/$defs/uuid"},
+    "generated_at": {"$ref": "#/$defs/timestamp"},
+    "engine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "ai_used", "ai_provider", "ai_model"],
+      "properties": {
+        "name": {"const": "Cloudpositive AI Engine"},
+        "ai_used": {"type": "boolean"},
+        "ai_provider": {"enum": ["openai", null]},
+        "ai_model": {"type": ["string", "null"]}
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "service", "account_id", "region", "analysis_run_id", "evidence_id"],
+      "properties": {
+        "provider": {"const": "aws"},
+        "service": {"const": "ec2"},
+        "account_id": {"type": "string", "pattern": "^[0-9]{12}$"},
+        "region": {"type": "string", "pattern": "^[a-z]{2}(-[a-z]+)+-[0-9]+$"},
+        "analysis_run_id": {"type": "integer", "minimum": 1},
+        "evidence_id": {"$ref": "#/$defs/uuid"}
+      }
+    },
+    "analysis_window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "purpose", "description", "start", "end", "hours"],
+      "properties": {
+        "key": {"enum": ["1h", "1d", "3d", "7d", "30d", "90d"]},
+        "purpose": {"enum": ["production", "testing"]},
+        "description": {"type": "string", "minLength": 1},
+        "start": {"$ref": "#/$defs/timestamp"},
+        "end": {"$ref": "#/$defs/timestamp"},
+        "hours": {"type": "integer", "minimum": 0}
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min_coverage_percent", "min_evidence_hours", "cpu_safety_factor", "memory_safety_factor", "candidate_scope", "pricing_evaluated", "pricing_source"],
+      "properties": {
+        "min_coverage_percent": {"$ref": "#/$defs/percent"},
+        "min_evidence_hours": {"type": "number", "minimum": 0},
+        "cpu_safety_factor": {"type": "number", "minimum": 1},
+        "memory_safety_factor": {"type": "number", "minimum": 1},
+        "candidate_scope": {"const": "same instance family"},
+        "pricing_evaluated": {"type": "boolean"},
+        "pricing_source": {"const": "AWS Price List API (on-demand)"}
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instance_count", "by_decision", "actionable", "estimated_monthly_savings_usd"],
+      "properties": {
+        "instance_count": {"$ref": "#/$defs/count"},
+        "by_decision": {
+          "type": "object",
+          "propertyNames": {"$ref": "#/$defs/decision"},
+          "additionalProperties": {"$ref": "#/$defs/count"}
+        },
+        "actionable": {"$ref": "#/$defs/count"},
+        "estimated_monthly_savings_usd": {"$ref": "#/$defs/nullableUsd"}
+      }
+    },
+    "recommendations": {"type": "array", "items": {"$ref": "#/$defs/recommendation"}}
+  },
+  "$defs": {
+    "uuid": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+    "timestamp": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "nullableTimestamp": {"oneOf": [{"$ref": "#/$defs/timestamp"}, {"type": "null"}]},
+    "count": {"type": "integer", "minimum": 0},
+    "percent": {"type": "number", "minimum": 0, "maximum": 100},
+    "nullablePercent": {"oneOf": [{"$ref": "#/$defs/percent"}, {"type": "null"}]},
+    "decision": {"enum": ["INSUFFICIENT_DATA", "KEEP_CURRENT", "DOWNSIZE_CANDIDATE", "UPSCALE_CANDIDATE", "INVESTIGATE"]},
+    "size": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instance_type", "vcpus", "memory_mib"],
+      "properties": {
+        "instance_type": {"type": "string", "pattern": "^[a-z0-9-]+\\.[a-z0-9-]+$"},
+        "vcpus": {"type": ["integer", "null"], "minimum": 1},
+        "memory_mib": {"type": ["integer", "null"], "minimum": 1}
+      }
+    },
+    "metricEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected_hours", "available_hours", "coverage_percent", "datapoints", "average", "p95", "maximum", "trend", "volatility", "sufficient"],
+      "properties": {
+        "expected_hours": {"type": "number", "minimum": 0},
+        "available_hours": {"type": "number", "minimum": 0},
+        "coverage_percent": {"$ref": "#/$defs/percent"},
+        "datapoints": {"$ref": "#/$defs/count"},
+        "average": {"$ref": "#/$defs/nullablePercent"},
+        "p95": {"$ref": "#/$defs/nullablePercent"},
+        "maximum": {"$ref": "#/$defs/nullablePercent"},
+        "trend": {"enum": ["GROWING", "STABLE", "DECLINING", null]},
+        "volatility": {"enum": ["LOW", "MODERATE", "HIGH", "STABLE", null]},
+        "sufficient": {"type": "boolean"}
+      }
+    },
+    "stringList": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "recommendation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instance_id", "name", "state", "current", "evidence", "eligibility", "capacity", "candidates", "pricing", "decision", "recommended", "confidence", "decided_by", "summary", "reasoning", "risks", "missing_evidence", "action"],
+      "properties": {
+        "instance_id": {"type": "string", "pattern": "^i-[0-9a-f]{8,17}$"},
+        "name": {"type": ["string", "null"]},
+        "state": {"type": "string"},
+        "current": {"$ref": "#/$defs/size"},
+        "evidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cpu_utilization", "memory_utilization"],
+          "properties": {
+            "cpu_utilization": {"$ref": "#/$defs/metricEvidence"},
+            "memory_utilization": {"$ref": "#/$defs/metricEvidence"}
+          }
+        },
+        "eligibility": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["eligible", "reasons", "eligible_after"],
+          "properties": {
+            "eligible": {"type": "boolean"},
+            "reasons": {"$ref": "#/$defs/stringList"},
+            "eligible_after": {"$ref": "#/$defs/nullableTimestamp"}
+          }
+        },
+        "capacity": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["cpu_p95", "memory_p95", "cpu_required_percent", "cpu_required_vcpus", "memory_required_mib", "cpu_pressure", "memory_pressure"],
+              "properties": {
+                "cpu_p95": {"$ref": "#/$defs/percent"},
+                "memory_p95": {"$ref": "#/$defs/percent"},
+                "cpu_required_percent": {"$ref": "#/$defs/percent"},
+                "cpu_required_vcpus": {"type": "number", "minimum": 0},
+                "memory_required_mib": {"type": "number", "minimum": 0},
+                "cpu_pressure": {"enum": ["VERY_LOW", "LOW", "MEDIUM", "HIGH", "CRITICAL"]},
+                "memory_pressure": {"enum": ["VERY_LOW", "LOW", "MEDIUM", "HIGH", "CRITICAL"]}
+              }
+            }
+          ]
+        },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["instance_type", "vcpus", "memory_mib", "safe", "reasons", "hourly_usd"],
+            "properties": {
+              "instance_type": {"type": "string"},
+              "vcpus": {"type": "integer", "minimum": 1},
+              "memory_mib": {"type": "integer", "minimum": 1},
+              "safe": {"type": "boolean"},
+              "reasons": {"$ref": "#/$defs/stringList"},
+              "hourly_usd": {"$ref": "#/$defs/nullableUsd"}
+            }
+          }
+        },
+        "pricing": {"oneOf": [{"$ref": "#/$defs/pricing"}, {"type": "null"}]},
+        "decision": {"$ref": "#/$defs/decision"},
+        "recommended": {"oneOf": [{"$ref": "#/$defs/size"}, {"type": "null"}]},
+        "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "decided_by": {"enum": ["evidence_gate", "rules", "ai"]},
+        "summary": {"type": "string", "minLength": 1},
+        "reasoning": {"$ref": "#/$defs/stringList"},
+        "risks": {"$ref": "#/$defs/stringList"},
+        "missing_evidence": {"$ref": "#/$defs/stringList"},
+        "action": {"type": "string", "minLength": 1}
+      }
+    },
+    "usd": {"type": "number", "minimum": 0},
+    "nullableUsd": {"oneOf": [{"$ref": "#/$defs/usd"}, {"type": "null"}]},
+    "pricing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["available", "reason", "source", "operating_system", "tenancy", "currency", "hours_per_month", "current_hourly_usd", "current_monthly_usd", "recommended_hourly_usd", "recommended_monthly_usd", "monthly_savings_usd", "savings_percent", "effective_date", "fetched_at"],
+      "properties": {
+        "available": {"type": "boolean"},
+        "reason": {"type": ["string", "null"]},
+        "source": {"const": "AWS Price List API (on-demand)"},
+        "operating_system": {"type": ["string", "null"]},
+        "tenancy": {"type": ["string", "null"]},
+        "currency": {"const": "USD"},
+        "hours_per_month": {"type": "integer", "minimum": 1},
+        "current_hourly_usd": {"$ref": "#/$defs/nullableUsd"},
+        "current_monthly_usd": {"$ref": "#/$defs/nullableUsd"},
+        "recommended_hourly_usd": {"$ref": "#/$defs/nullableUsd"},
+        "recommended_monthly_usd": {"$ref": "#/$defs/nullableUsd"},
+        "monthly_savings_usd": {
+          "type": ["number", "null"],
+          "description": "current minus recommended monthly cost; negative means the change costs more"
+        },
+        "savings_percent": {"type": ["number", "null"]},
+        "effective_date": {"type": ["string", "null"]},
+        "fetched_at": {"$ref": "#/$defs/nullableTimestamp"}
+      }
+    }
+  }
+}

@@ -73,7 +73,7 @@ A `WINDOW` cannot be combined with `--day` or `--hour`, and `--day` cannot be co
 
 ## Analysis windows
 
-Defined in `windows.py` (`ANALYSIS_WINDOWS`, `DEFAULT_WINDOW = "30d"`).
+Defined in `app/cloud/windows.py` (`ANALYSIS_WINDOWS`, `DEFAULT_WINDOW = "30d"`), shared with Azure VMs.
 
 | Window | Purpose | Covers | Example on 10 Nov 2026, 07:20 UTC |
 |---|---|---|---|
@@ -430,14 +430,18 @@ HAVING datapoints = 0;
 | `instances.py` | `describe_instances()` (the single EC2 call), `list_instances()`, list output |
 | `configuration.py` | `get_configurations()`: full specs, instance types and EBS volumes |
 | `changes.py` | `InstanceSnapshot`, `compare()`: added, removed and modified instances |
-| `windows.py` | `ANALYSIS_WINDOWS`: calendar (30d, 90d) and rolling (1h–7d) windows |
-| `metrics.py` | CloudWatch metric definitions, settled hours, missing-hour planning, `fetch()` |
+| `metrics.py` | CloudWatch metric definitions and `fetch()` (hour planning is shared: `app/cloud/timeseries.py`) |
 | `utilization.py` | Fill missing hours, the datapoint report, quick analysis (`analyze()`, day/hour selection) |
 | `store.py` | Writes and reads instances, snapshots, changes, datapoints, checked ranges, run summaries |
 | `analysis.py` | `run_analysis()`: the full analysis, readiness, history |
+| `evidence.py` | Evidence document (EC2 source and configuration) and validation |
+| `pipeline.py` | The nine-step evidence pipeline |
+| `pricing.py` | AWS Price List API on-demand prices |
 | `README.md` | This document |
 
-Shared code used here (not duplicated):
+Shared code used here (not duplicated, also used by `app/cloud/azure/vm`):
+`app/cloud/{timeseries,windows,cumulative,utilization,evidence,evidence_output,pricing,backoff,display}.py`
+and `app/db/metrics.py`. Also:
 
 | File | Used for |
 |---|---|
@@ -461,13 +465,15 @@ The schema lives in `app/db/migrations/`. Pending files are applied automaticall
 | `0002_ec2_metrics.sql` | `ec2_metric_datapoints`, `ec2_metric_collections` |
 | `0003_ec2_metrics_instance_columns.sql` | `instance_id`, `instance_name` on both metrics tables |
 | `0004_ec2_metric_fetches.sql` | `ec2_metric_fetches`; `requested_points`, `fetched_points` on collections |
+| `0005_ec2_metric_cumulative.sql` | `ec2_metric_cumulative`: cumulative statistics per configuration version |
+| `0006_azure_vm_tables.sql` | `azure_vms`, `azure_vm_disks`, `azure_vm_metric_*`; wider `analysis_runs.window_key` |
 
 ```bash
 python -m app.db status     # applied / pending migrations and row counts
 python -m app.db migrate    # apply pending migrations now
 ```
 
-To store new kinds of data, add the next numbered file, for example `0005_<name>.sql`. Never
+To store new kinds of data, add the next numbered file, for example `0007_<name>.sql`. Never
 edit a migration that has already been applied; the app refuses to run if one changes.
 
 ---

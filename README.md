@@ -195,6 +195,7 @@ Every entry point is a Python module run with `python -m` from the project root.
 | `python -m app.cloud.azure.vm.pricing` | `app/cloud/azure/vm/pricing.py` | Azure pay-as-you-go prices |
 | `python -m app.auth` | `app/auth/__main__.py` | Connection checks: AWS, Azure, MySQL, analysis DB, OpenSearch |
 | `python -m app.db` | `app/db/__main__.py` | Analysis database: migration status and row counts, apply migrations |
+| `python -m app.server.mysql.active_tenants` | `app/server/mysql/active_tenants.py` | Active, non-deleted tenant IDs from the company database (read-only) |
 
 Every command accepts `-h` / `--help`.
 
@@ -279,7 +280,17 @@ python -m app.db status            # migrations applied/pending, row counts per 
 python -m app.db migrate           # apply pending migrations now
 ```
 
-### 7.3 AI engine (recommended entry point)
+### 7.3 Company database queries (read-only)
+
+```bash
+python -m app.server.mysql.active_tenants          # active tenants: company name and tenant ID
+python -m app.server.mysql.active_tenants --json   # only the tenant IDs, as a JSON array
+```
+
+Reads `tenants` where `tenant_status = 'active'` and `is_deleted = 0`, through the read-only
+`DB_*` connection.
+
+### 7.4 AI engine (recommended entry point)
 
 ```bash
 python -m app.reasoning                             # EC2, default window (30d), AI
@@ -303,7 +314,7 @@ python -m app.reasoning 7d -o rec.json -p           # custom output file, also p
 | `-o FILE` | Recommendations file to write |
 | `-p` | Also print the recommendations JSON |
 
-### 7.4 AWS EC2
+### 7.5 AWS EC2
 
 ```bash
 python -m app.cloud.aws.ec2                          # list instances (default command)
@@ -326,7 +337,7 @@ python -m app.cloud.aws.ec2.pricing m5.large --os Windows --region eu-west-1
 
 Every EC2 command except `validate` accepts `--region`.
 
-### 7.5 Azure VMs
+### 7.6 Azure VMs
 
 ```bash
 python -m app.cloud.azure.vm                         # list VMs (default command)
@@ -343,7 +354,7 @@ python -m app.cloud.azure.vm.pricing Standard_E4s_v5 --location westeurope --os 
 
 Every Azure command except `validate` accepts `--location` (default: every location).
 
-### 7.6 Evidence pipeline options (EC2 and Azure)
+### 7.7 Evidence pipeline options (EC2 and Azure)
 
 | Option | Meaning |
 |---|---|
@@ -404,6 +415,7 @@ AI-Optimizations/
     ├── config.py                analysis windows, thresholds, safety factors
     ├── auth/                    connections to clouds, databases, OpenSearch
     ├── db/                      local analysis database: sessions, migrations, storage
+    ├── server/mysql/            read-only queries on the company database (active tenants)
     ├── cloud/                   provider-neutral analysis code
     │   ├── aws/                 AWS helpers
     │   │   └── ec2/             EC2 discovery, analysis, evidence, pricing
@@ -454,6 +466,12 @@ AI-Optimizations/
 | `migrations/0004_ec2_metric_fetches.sql` | `ec2_metric_fetches` (hours already requested) |
 | `migrations/0005_ec2_metric_cumulative.sql` | `ec2_metric_cumulative` (statistics per configuration version) |
 | `migrations/0006_azure_vm_tables.sql` | `azure_vms`, `azure_vm_disks`, `azure_vm_metric_*`; wider window key |
+
+### `app/server/`: company database queries (read-only)
+
+| File | Purpose |
+|---|---|
+| `mysql/active_tenants.py` | `active_tenant_ids()` / `fetch_active_tenants()`: tenants with `tenant_status = 'active'` and `is_deleted = 0`; also a command |
 
 ### `app/cloud/`: shared by every cloud
 

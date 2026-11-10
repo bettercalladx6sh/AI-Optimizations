@@ -14,6 +14,8 @@ Usage:
     python -m app.cloud.aws.ec2 metrics 7d -r api-01         # quick: one instance
     python -m app.cloud.aws.ec2 metrics -o                   # quick, stored data only (no CloudWatch)
     python -m app.cloud.aws.ec2 history -r i-0abc123         # stored changes of one instance
+    python -m app.cloud.aws.ec2 evidence                     # step-by-step pipeline: AI evidence JSON
+    python -m app.cloud.aws.ec2 validate evidence.json       # check an evidence file against the schema
     python -m app.cloud.aws.ec2 run 7d --region eu-west-1    # another region
 """
 
@@ -22,10 +24,11 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Callable
+from pathlib import Path
 
 from app.auth import aws_auth
 from app.auth.common import AuthError, hint, status, warning
-from app.cloud.aws.ec2 import utilization
+from app.cloud.aws.ec2 import pipeline, utilization
 from app.cloud.aws.ec2.analysis import get_history, print_analysis, print_history, run_analysis
 from app.cloud.aws.ec2.configuration import get_configurations, print_configurations
 from app.cloud.aws.ec2.instances import DEFAULT_STATES, INSTANCE_STATES, list_instances, print_instances
@@ -62,6 +65,15 @@ def _run_metrics(args: argparse.Namespace, region: str) -> None:
 
 def _run_history(args: argparse.Namespace, region: str) -> None:
     print_history(get_history(region, args.resource, args.limit), region)
+
+
+def _run_evidence(args: argparse.Namespace, region: str) -> int:
+    args.region = region
+    return pipeline.main(args)
+
+
+def _run_validate(args: argparse.Namespace, region: str | None) -> int:
+    return pipeline.validate_file(args.file)
 
 
 def _positive(value: str) -> int:
@@ -209,6 +221,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     history_cmd.set_defaults(run=_run_history)
 
+    evidence_cmd = commands.add_parser(
+        "evidence",
+        aliases=["prepare"],
+        help="step-by-step pipeline: analysis, then validated JSON evidence for AI rightsizing",
+    )
+    pipeline.add_arguments(evidence_cmd)
+    evidence_cmd.set_defaults(run=_run_evidence)
+
+    validate_cmd = commands.add_parser("validate", help="check an evidence JSON file against the schema")
+    validate_cmd.add_argument("file", type=Path, help="evidence JSON file")
+    validate_cmd.set_defaults(run=_run_validate, needs_region=False)
+
     args = parser.parse_args(argv)
     if getattr(args, "window", None) and (getattr(args, "day", None) or getattr(args, "hour", None)):
         parser.error("give either a WINDOW or --day/--hour, not both")
@@ -220,13 +244,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
     try:
-        region = args.region or aws_auth.get_session().region_name
-        args.run(args, region)
+        region = None
+        if getattr(args, "needs_region", True):
+            region = args.region or aws_auth.get_session().region_name
+        return args.run(args, region) or 0
     except AuthError as exc:
         status(False, f"EC2 {args.command} failed: {exc}")
         hint(exc.hints)
         return 1
-    return 0
 
 
 raise SystemExit(main())

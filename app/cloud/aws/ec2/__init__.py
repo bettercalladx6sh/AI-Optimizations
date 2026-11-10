@@ -8,6 +8,7 @@ from app.cloud.aws.ec2.configuration import (
     print_configurations,
 )
 from app.cloud.aws.ec2.cumulative import CumulativeSummary, summarize
+from app.cloud.aws.ec2.evidence import SCHEMA_PATH, SCHEMA_VERSION, build_evidence, validate_evidence
 from app.cloud.aws.ec2.instances import Ec2Instance, list_instances, print_instances
 from app.cloud.aws.ec2.metrics import METRICS, MetricSeries, fetch, plan_requests
 from app.cloud.aws.ec2.utilization import UtilizationReport, analyze
@@ -24,8 +25,11 @@ __all__ = [
     "InstanceSnapshot",
     "METRICS",
     "MetricSeries",
+    "SCHEMA_PATH",
+    "SCHEMA_VERSION",
     "UtilizationReport",
     "analyze",
+    "build_evidence",
     "compare",
     "fetch",
     "get_configurations",
@@ -35,4 +39,5 @@ __all__ = [
     "print_instances",
     "run_analysis",
     "summarize",
+    "validate_evidence",
 ]

@@ -12,8 +12,9 @@
 
 Steps 1-6 are the analysis run (analysis.run_analysis); 7-9 build, validate and write the JSON
 evidence that AI evaluation will use for rightsizing decisions. Evidence is built in memory for
-each run and is not stored in the database; it is written only to a JSON file, and only after
-it passed validation.
+each run and is not stored in the database. It is written to one JSON file per account, region
+and window (evidence/aws/ec2/<account>/<region>/<window>.json), which every new run of that
+window replaces atomically, and only after the new evidence passed validation.
 
 Usage:
     python -m app.cloud.aws.ec2.pipeline                  # 30d (month to date)
@@ -31,15 +32,16 @@ from pathlib import Path
 from typing import Any
 
 from app.auth import aws_auth
-from app.auth.common import ENV_PATH, AuthError, console, hint, status
+from app.auth.common import AuthError, console, hint, status
 from app.cloud.aws.ec2 import analysis
 from app.cloud.aws.ec2.evidence import SCHEMA_VERSION, build_evidence, validate_evidence
 from app.cloud.aws.ec2.windows import ANALYSIS_WINDOWS, DEFAULT_WINDOW
 from app.cloud.display import plural
+from app.cloud.files import PROJECT_ROOT, display_path, write_json
 from app.cloud.schema import EvidenceValidationError, ValidationIssue
 
-STEPS = (*analysis.STEPS, "Prepare evidence", "Validate evidence schema", "Write evidence file")
-EVIDENCE_DIR = ENV_PATH.parent / "evidence"
+STEPS = (*analysis.STEPS, "Prepare evidence", "Validate evidence schema", "Update evidence file")
+EVIDENCE_DIR = PROJECT_ROOT / "evidence"
 MAX_ISSUES_SHOWN = 25
 
 
@@ -59,28 +61,25 @@ class StepPrinter:
         self.titles = titles
         self.done = 0
         self.width = max(len(title) for title in titles)
+        self.digits = len(str(len(titles)))
 
     def __call__(self, title: str, detail: str) -> None:
         self.done += 1
         console.print(
-            f"[bold green]✔[/] [dim]{self.done}/{len(self.titles)}[/] {title:<{self.width}}  [dim]{detail}[/]"
+            f"[bold green]✔[/] [dim]{self.done:>{self.digits}}/{len(self.titles)}[/] {title:<{self.width}}  [dim]{detail}[/]"
         )
 
     def failed(self, message: str, hints: tuple[str, ...] = ()) -> None:
         title = self.titles[min(self.done, len(self.titles) - 1)]
-        console.print(f"[bold red]✘[/] [dim]{self.done + 1}/{len(self.titles)}[/] {title:<{self.width}}  [red]{message}[/]")
+        console.print(f"[bold red]✘[/] [dim]{self.done + 1:>{self.digits}}/{len(self.titles)}[/] {title:<{self.width}}  [red]{message}[/]")
         hint(hints)
 
 
 def default_path(document: dict[str, Any]) -> Path:
-    """evidence/aws/ec2/<account>/<region>/run-<id>.json under the project root."""
+    """evidence/aws/ec2/<account>/<region>/<window>.json under the project root, e.g. .../30d.json."""
     source = document["source"]
-    return EVIDENCE_DIR / "aws" / "ec2" / source["account_id"] / source["region"] / f"run-{source['analysis_run_id']}.json"
-
-
-def write_json(document: dict[str, Any], path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    window = document["analysis_window"]["key"]
+    return EVIDENCE_DIR / "aws" / "ec2" / source["account_id"] / source["region"] / f"{window}.json"
 
 
 def print_issues(issues: list[ValidationIssue]) -> None:
@@ -119,9 +118,8 @@ def run_pipeline(
     path = None
     if write_file:
         path = output or default_path(evidence)
-        write_json(evidence, path)
-        shown = path.relative_to(ENV_PATH.parent) if path.is_relative_to(ENV_PATH.parent) else path
-        steps(STEPS[8], str(shown))
+        updated = write_json(evidence, path)
+        steps(STEPS[8], f"{'updated' if updated else 'created'} {display_path(path)}")
     else:
         steps(STEPS[8], "skipped (--no-file) · evidence kept in memory for this run")
 
@@ -143,7 +141,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "-o", "--output",
         type=Path,
         metavar="FILE",
-        help="where to write the evidence JSON (default: evidence/aws/ec2/<account>/<region>/run-<id>.json)",
+        help="evidence JSON file to create or update (default: evidence/aws/ec2/<account>/<region>/<window>.json)",
     )
     parser.add_argument("--no-file", action="store_true", help="do not write the JSON file (use with -p)")
     parser.add_argument("-p", "--print", dest="print_json", action="store_true", help="also print the evidence JSON")

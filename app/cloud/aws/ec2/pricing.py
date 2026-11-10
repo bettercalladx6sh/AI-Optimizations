@@ -19,8 +19,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import dataclass
-from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any
 
@@ -28,9 +26,11 @@ from app.auth import aws_auth
 from app.auth.common import AuthError, console, hint, status
 from app.cloud.aws.backoff import with_backoff
 from app.cloud.aws.errors import aws_errors
+from app.cloud.pricing import HOURS_PER_MONTH, InstancePrice, PricingBasis, fetched_at
+
+__all__ = ["HOURS_PER_MONTH", "InstancePrice", "PricingBasis", "fetch_prices", "fetched_at", "pricing_basis"]
 
 PRICING_API_REGION = "us-east-1"     # the Price List API endpoint; it serves prices for every region
-HOURS_PER_MONTH = 730                # AWS convention for monthly estimates (8760 h / 12)
 MAX_RESULTS = 100
 
 # EC2 PlatformDetails -> Price List operatingSystem
@@ -43,32 +43,6 @@ OPERATING_SYSTEMS = {
 }
 # EC2 Placement.Tenancy -> Price List tenancy
 TENANCIES = {"default": "Shared", "dedicated": "Dedicated", "host": "Host"}
-
-
-@dataclass(frozen=True)
-class InstancePrice:
-    """The on-demand list price of one instance type."""
-
-    instance_type: str
-    region: str
-    operating_system: str
-    tenancy: str
-    hourly_usd: float
-    effective_date: str | None
-    published_at: str | None
-
-    @property
-    def monthly_usd(self) -> float:
-        return round(self.hourly_usd * HOURS_PER_MONTH, 2)
-
-
-@dataclass(frozen=True)
-class PricingBasis:
-    """What to price an instance as, or why it cannot be priced."""
-
-    operating_system: str | None
-    tenancy: str | None
-    reason: str | None = None
 
 
 def pricing_basis(configuration: dict[str, Any]) -> PricingBasis:
@@ -159,10 +133,6 @@ def fetch_prices(
         for instance_type, prices in found.items()
         if len({price.hourly_usd for price in prices}) == 1
     }
-
-
-def fetched_at() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def main(argv: list[str] | None = None) -> int:

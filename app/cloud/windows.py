@@ -4,8 +4,9 @@
     calendar   the current month and the (N - 1) months before it, from the 1st 00:00 UTC to
                date; on 10 November a 1-month window covers 1-10 November (9 days, not 30)
 
-Every window ends at the last settled hour (see metrics.settled_end). Labels, readiness and
+Every window ends at the last settled hour (see timeseries.settled_end). Labels, readiness and
 evidence always use the real span of the window at run time, never a nominal number of days.
+Shared by every provider (EC2, Azure VMs).
 """
 
 from __future__ import annotations
@@ -13,10 +14,11 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from app import config
-from app.cloud.aws.ec2.metrics import PERIOD, SETTLE_DELAY, floor_hour, settled_end
 from app.cloud.display import format_duration
+from app.cloud.timeseries import PERIOD, SETTLE_DELAY, floor_hour, settled_end
 
 PURPOSES = ("production", "testing")
 KEY_PATTERN = re.compile(r"^[a-z0-9]{1,16}$")
@@ -61,6 +63,37 @@ class AnalysisWindow:
         else:
             covered_from = _ceil_hour(since + self.duration)
         return covered_from + SETTLE_DELAY
+
+
+@dataclass(frozen=True)
+class Readiness:
+    """Whether an instance's current configuration covers the whole window, so it can be evaluated."""
+
+    snapshot: Any                 # the provider's instance snapshot (has instance_id and name)
+    reason: str
+    since: datetime | None
+    ready_at: datetime | None
+    checked_at: datetime
+
+    @property
+    def ready(self) -> bool:
+        return self.ready_at is None or self.checked_at >= self.ready_at
+
+
+def readiness_of(
+    snapshot: Any,
+    launched_at: datetime | None,
+    changed_at: datetime | None,
+    change_reason: str,
+    window: AnalysisWindow,
+    now: datetime,
+) -> Readiness:
+    """Ready once the window no longer contains hours from before the later of launch and last change."""
+    events = [(moment, reason) for moment, reason in ((launched_at, "launched"), (changed_at, change_reason)) if moment]
+    if not events:
+        return Readiness(snapshot, "stable", None, None, now)
+    since, reason = max(events)
+    return Readiness(snapshot, reason, since, window.ready_at(since), now)
 
 
 def span_label(key: str, purpose: str, description: str, hours: int) -> str:

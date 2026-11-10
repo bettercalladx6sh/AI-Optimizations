@@ -1,10 +1,9 @@
-"""Exponential backoff with full jitter for AWS API calls that are throttled or briefly unavailable.
+"""Backoff for AWS API calls that are throttled or briefly unavailable.
 
 botocore already retries a few times inside each call; with_backoff adds a longer, jittered
-outer layer so a burst of requests (many families, many pages) slows down instead of failing.
-Only throttling, 5xx and connection errors are retried; permission or input errors fail at once.
-
-    delay for attempt n = random(0, min(MAX_DELAY, BASE_DELAY x 2^(n-1)))
+outer layer (app/cloud/backoff.py) so a burst of requests (many families, many pages) slows
+down instead of failing. Only throttling, 5xx and connection errors are retried; permission or
+input errors fail at once.
 
 Usage:
     response = with_backoff(client.get_products, ServiceCode="AmazonEC2", Filters=filters)
@@ -12,7 +11,6 @@ Usage:
 
 from __future__ import annotations
 
-import random
 import time
 from collections.abc import Callable
 from typing import TypeVar
@@ -25,11 +23,9 @@ from botocore.exceptions import (
     ReadTimeoutError,
 )
 
-from app.auth.common import console
+from app.cloud.backoff import MAX_ATTEMPTS, backoff_delay, retry
 
-MAX_ATTEMPTS = 6
-BASE_DELAY = 0.5      # seconds
-MAX_DELAY = 20.0      # seconds
+__all__ = ["MAX_ATTEMPTS", "backoff_delay", "is_retryable", "with_backoff"]
 
 THROTTLING_CODES = {
     "Throttling",
@@ -60,14 +56,8 @@ def is_retryable(exc: BaseException) -> bool:
     return False
 
 
-def backoff_delay(attempt: int, base: float = BASE_DELAY, cap: float = MAX_DELAY) -> float:
-    """Full-jitter delay before retry number `attempt` (1-based)."""
-    return random.uniform(0.0, min(cap, base * 2 ** (attempt - 1)))
-
-
-def _report_retry(label: str, exc: BaseException, attempt: int, retries: int, delay: float) -> None:
-    reason = exc.response.get("Error", {}).get("Code", "error") if isinstance(exc, ClientError) else type(exc).__name__
-    console.print(f"  [yellow]↻[/] [dim]{label}: {reason}; retry {attempt}/{retries} in {delay:.1f}s[/]")
+def _describe(exc: BaseException) -> str:
+    return exc.response.get("Error", {}).get("Code", "error") if isinstance(exc, ClientError) else type(exc).__name__
 
 
 def with_backoff(
@@ -83,14 +73,5 @@ def with_backoff(
     The last error is re-raised unchanged, so callers keep their usual error mapping
     (for example app.cloud.aws.errors.aws_errors).
     """
-    label = label or getattr(call, "__name__", "AWS call")
-    for attempt in range(1, attempts + 1):
-        try:
-            return call(*args, **kwargs)
-        except Exception as exc:
-            if attempt == attempts or not is_retryable(exc):
-                raise
-            delay = backoff_delay(attempt)
-            _report_retry(label, exc, attempt, attempts - 1, delay)
-            sleep(delay)
-    raise AssertionError("unreachable")
+    return retry(call, *args, retryable=is_retryable, describe=_describe,
+                 label=label or getattr(call, "__name__", "AWS call"), attempts=attempts, sleep=sleep, **kwargs)

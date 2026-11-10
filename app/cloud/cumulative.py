@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from statistics import mean, pstdev
 
-from app.cloud.aws.ec2.metrics import PERIOD, Datapoint
+from app.cloud.timeseries import PERIOD, Datapoint
 
 TREND_CHANGE_PERCENT = 10.0       # second half vs first half: >= +10% GROWING, <= -10% DECLINING
 VOLATILITY_HIGH = 0.50            # coefficient of variation (std dev / average)

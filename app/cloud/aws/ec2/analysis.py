@@ -12,7 +12,7 @@ A run has six steps, reported one by one through an optional `on_step` callback:
 Windows come from app/config.py (calendar windows such as 30d = month to date, or rolling
 ones such as 7d). An instance can only be evaluated once its current configuration covers the
 whole window, i.e. the window holds no hour from before its launch or last significant change;
-until then clients are told exactly when to run again (see AnalysisWindow.ready_at).
+until then clients are told exactly when to run again (see app/cloud/windows.py).
 """
 
 from __future__ import annotations
@@ -38,8 +38,8 @@ from app.cloud.aws.ec2.changes import (
 from app.cloud.aws.ec2.configuration import InstanceConfiguration, build_configurations
 from app.cloud.aws.ec2.instances import INSTANCE_STATES, describe_instances, state_summary
 from app.cloud.aws.ec2.metrics import FetchResult, fetch, hours, plan_requests
-from app.cloud.aws.ec2.windows import ANALYSIS_WINDOWS, DEFAULT_WINDOW, AnalysisWindow
 from app.cloud.display import field, format_duration, format_time, plural, print_header, section
+from app.cloud.windows import ANALYSIS_WINDOWS, DEFAULT_WINDOW, AnalysisWindow, Readiness, readiness_of
 from app.db import resources
 
 StepCallback = Callable[[str, str], None]
@@ -53,21 +53,6 @@ STEPS = (
     "Collect CloudWatch metrics",
     "Store data and calculate cumulative averages",
 )
-
-
-@dataclass(frozen=True)
-class Readiness:
-    """Whether an instance's current configuration covers the whole window, so it can be evaluated."""
-
-    snapshot: InstanceSnapshot
-    reason: str
-    since: datetime | None
-    ready_at: datetime | None
-    checked_at: datetime
-
-    @property
-    def ready(self) -> bool:
-        return self.ready_at is None or self.checked_at >= self.ready_at
 
 
 @dataclass(frozen=True)
@@ -97,22 +82,6 @@ class StoredChange:
     run_id: int
     detected_at: datetime
     change: InstanceChange
-
-
-def _readiness(
-    snapshot: InstanceSnapshot,
-    launched_at: datetime | None,
-    changed_at: datetime | None,
-    change_reason: str,
-    window: AnalysisWindow,
-    now: datetime,
-) -> Readiness:
-    """Ready once the window no longer contains hours from before the later of launch and last change."""
-    events = [(moment, reason) for moment, reason in ((launched_at, "launched"), (changed_at, change_reason)) if moment]
-    if not events:
-        return Readiness(snapshot, "stable", None, None, now)
-    since, reason = max(events)
-    return Readiness(snapshot, reason, since, window.ready_at(since), now)
 
 
 def _stored_change(entry: resources.StoredResource | None) -> tuple[datetime | None, str]:
@@ -263,7 +232,7 @@ def run_analysis(
         for iid in current
     }
     readiness = [
-        _readiness(current[iid], configs[iid].launch_time, *last_changed[iid], window, now)
+        readiness_of(current[iid], configs[iid].launch_time, *last_changed[iid], window, now)
         for iid in measured
     ]
     readiness.sort(key=lambda item: (item.ready, item.snapshot.name.lower(), item.snapshot.instance_id))

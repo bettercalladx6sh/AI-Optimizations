@@ -5,35 +5,31 @@ resource_tags, resource_changes via app.db.resources) plus EC2-specific typed ro
 (ec2_instances, ec2_volumes) for querying its current configuration, and its hourly
 CPU and memory averages (ec2_metric_datapoints), the hour ranges already checked in
 CloudWatch (ec2_metric_fetches), a per-run summary (ec2_metric_collections) and the
-cumulative summary per configuration version (ec2_metric_cumulative).
+cumulative summary per configuration version (ec2_metric_cumulative). The metric tables are
+handled by the shared app/db/metrics.py.
 """
 
 from __future__ import annotations
-import json
-from collections import defaultdict
-from collections.abc import Iterable
-from dataclasses import asdict, dataclass
+
+from dataclasses import asdict
 from datetime import datetime
 from typing import Any
 
 from pymysql.connections import Connection
 
 from app.cloud.aws.ec2.changes import SPEC_FIELDS, FieldChange, InstanceChange, InstanceSnapshot
-from app.cloud.aws.ec2.cumulative import CumulativeSummary
 from app.cloud.aws.ec2.configuration import InstanceConfiguration
-from app.cloud.aws.ec2.metrics import (
-    METRICS,
-    PERIOD,
-    STATISTIC,
-    Coverage,
-    Datapoint,
-    FetchRequest,
-    MetricDefinition,
-    MetricSeries,
-    SeriesKey,
-)
+from app.cloud.aws.ec2.metrics import METRICS
 from app.db import resources
-from app.db.resources import ChangeRecord, StoredResource, from_db, to_db, to_json
+from app.db.metrics import MetricTables, MetricTarget
+from app.db.resources import ChangeRecord, StoredResource, to_db, to_json
+
+__all__ = [
+    "PROVIDER", "RESOURCE_TYPE", "SERVICE", "TABLES", "MetricTarget", "configuration_document",
+    "configuration_effective_since", "load_coverage", "load_points_since", "load_series", "metric_targets",
+    "record_change", "record_collection", "record_fetch", "save_cumulative", "save_datapoints", "save_instance",
+    "scope", "to_instance_change",
+]
 
 PROVIDER = "aws"
 SERVICE = "ec2"
@@ -167,288 +163,15 @@ def to_instance_change(record: ChangeRecord) -> InstanceChange:
         fields=tuple(FieldChange(item["field"], item["before"], item["after"]) for item in record.field_changes),
     )
 
-@dataclass(frozen=True)
-class MetricTarget:
-    """A stored instance whose metrics can be saved: its resource row and current name."""
 
-    ref: int
-    name: str
-
-
-def _instance_filter(instance_ids: Iterable[str]) -> tuple[str, list[str]]:
-    ids = sorted(set(instance_ids))
-    return ", ".join(["%s"] * len(ids)), ids
-
-
-def metric_targets(
-    connection: Connection,
-    instance_scope: resources.Scope,
-    resource_filter: str | None = None,
-) -> dict[str, MetricTarget]:
-    """Stored instances that still exist and are not terminated, optionally one by ID or name."""
-    query = (
-        "SELECT resource_id, id, COALESCE(name, '') FROM resources "
-        "WHERE account_ref = %s AND region = %s AND service = %s AND resource_type = %s "
-        "AND removed_at IS NULL AND COALESCE(state, '') <> 'terminated'"
-    )
-    params: list[Any] = [instance_scope.account_ref, instance_scope.region, instance_scope.service,
-                         instance_scope.resource_type]
-    if resource_filter:
-        query += " AND (resource_id = %s OR name = %s)"
-        params += [resource_filter, resource_filter]
-    with connection.cursor() as cursor:
-        cursor.execute(query, params)
-        return {instance_id: MetricTarget(ref, name) for instance_id, ref, name in cursor.fetchall()}
-
-
-def load_coverage(
-    connection: Connection,
-    instance_scope: resources.Scope,
-    start: datetime,
-    end: datetime,
-    instance_ids: Iterable[str],
-) -> dict[SeriesKey, Coverage]:
-    """For each instance and metric: hours stored in the window and ranges already checked."""
-    placeholders, ids = _instance_filter(instance_ids)
-    if not ids:
-        return {}
-    scope_params = [instance_scope.account_ref, instance_scope.region, instance_scope.service,
-                    instance_scope.resource_type, *ids]
-    scope_sql = (
-        "r.account_ref = %s AND r.region = %s AND r.service = %s AND r.resource_type = %s "
-        f"AND r.resource_id IN ({placeholders})"
-    )
-    stored: dict[SeriesKey, set[datetime]] = defaultdict(set)
-    checked: dict[SeriesKey, list[tuple[datetime, datetime]]] = defaultdict(list)
-
-    with connection.cursor() as cursor:
-        cursor.execute(
-            "SELECT r.resource_id, d.metric, d.period_start FROM ec2_metric_datapoints d "
-            f"JOIN resources r ON r.id = d.resource_ref WHERE {scope_sql} "
-            "AND d.period_start >= %s AND d.period_start < %s",
-            [*scope_params, to_db(start), to_db(end)],
-        )
-        for instance_id, metric_key, period_start in cursor.fetchall():
-            stored[(instance_id, metric_key)].add(from_db(period_start))
-
-        cursor.execute(
-            "SELECT r.resource_id, f.metric, f.range_start, f.range_end FROM ec2_metric_fetches f "
-            f"JOIN resources r ON r.id = f.resource_ref WHERE {scope_sql} "
-            "AND f.range_end > %s AND f.range_start < %s",
-            [*scope_params, to_db(start), to_db(end)],
-        )
-        for instance_id, metric_key, range_start, range_end in cursor.fetchall():
-            checked[(instance_id, metric_key)].append((from_db(range_start), from_db(range_end)))
-
-    return {
-        key: Coverage(frozenset(stored.get(key, ())), tuple(checked.get(key, ())))
-        for key in stored.keys() | checked.keys()
-    }
-
-
-def save_datapoints(
-    connection: Connection,
-    target: MetricTarget,
-    instance_id: str,
-    metric: MetricDefinition,
-    run_id: int,
-    fetched_at: datetime,
-    points: Iterable[Datapoint],
-) -> None:
-    """Store hourly averages: one row per instance, metric and hour, never duplicated."""
-    rows = [
-        (target.ref, instance_id, target.name or None, metric.key, to_db(point.period_start),
-         int(PERIOD.total_seconds()), point.average, metric.unit, run_id, to_db(fetched_at))
-        for point in points
-    ]
-    if not rows:
-        return
-    with connection.cursor() as cursor:
-        cursor.executemany(
-            "INSERT INTO ec2_metric_datapoints (resource_ref, instance_id, instance_name, metric, period_start, "
-            "period_seconds, average, unit, run_id, collected_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) AS new "
-            "ON DUPLICATE KEY UPDATE instance_name = new.instance_name, average = new.average, "
-            "run_id = new.run_id, collected_at = new.collected_at",
-            rows,
-        )
-
-
-def record_fetch(
-    connection: Connection,
-    target: MetricTarget,
-    request: FetchRequest,
-    run_id: int,
-    returned_points: int,
-    fetched_at: datetime,
-) -> None:
-    """Record an hour range as checked in CloudWatch, so it is never requested again."""
-    with connection.cursor() as cursor:
-        cursor.execute(
-            "INSERT INTO ec2_metric_fetches (run_id, resource_ref, instance_id, instance_name, metric, "
-            "range_start, range_end, requested_hours, returned_points, fetched_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-            (run_id, target.ref, request.instance_id, target.name or None, request.metric.key,
-             to_db(request.start), to_db(request.end), request.hours, returned_points, to_db(fetched_at)),
-        )
-
-
-def record_collection(
-    connection: Connection,
-    target: MetricTarget,
-    series: MetricSeries,
-    run_id: int,
-    requested_points: int,
-    fetched_points: int,
-) -> None:
-    """Record, for one run, what was available, requested and fetched for one series."""
-    with connection.cursor() as cursor:
-        cursor.execute(
-            "INSERT INTO ec2_metric_collections (run_id, resource_ref, instance_id, instance_name, metric, namespace, "
-            "metric_name, statistic, period_seconds, window_start, window_end, expected_points, requested_points, "
-            "fetched_points, collected_points) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-            (run_id, target.ref, series.instance_id, target.name or None, series.metric.key,
-             series.metric.namespace, series.metric.metric_name, STATISTIC, int(PERIOD.total_seconds()),
-             to_db(series.window_start), to_db(series.window_end), series.expected_points, requested_points,
-             fetched_points, series.collected_points),
-        )
-
-
-def load_series(
-    connection: Connection,
-    instance_scope: resources.Scope,
-    start: datetime,
-    end: datetime,
-    instance_ids: Iterable[str],
-) -> list[MetricSeries]:
-    """Every stored hourly average in the window, one series per instance and metric (even if empty)."""
-    placeholders, ids = _instance_filter(instance_ids)
-    if not ids:
-        return []
-    with connection.cursor() as cursor:
-        cursor.execute(
-            "SELECT r.resource_id, d.metric, d.period_start, d.average "
-            "FROM ec2_metric_datapoints d JOIN resources r ON r.id = d.resource_ref "
-            "WHERE r.account_ref = %s AND r.region = %s AND r.service = %s AND r.resource_type = %s "
-            f"AND r.resource_id IN ({placeholders}) AND d.period_start >= %s AND d.period_start < %s "
-            "ORDER BY d.period_start",
-            [instance_scope.account_ref, instance_scope.region, instance_scope.service,
-             instance_scope.resource_type, *ids, to_db(start), to_db(end)],
-        )
-        rows = cursor.fetchall()
-
-    points: dict[SeriesKey, list[Datapoint]] = defaultdict(list)
-    for instance_id, metric_key, period_start, average in rows:
-        points[(instance_id, metric_key)].append(Datapoint(from_db(period_start), average))
-
-    return [
-        MetricSeries(instance_id, metric, start, end, tuple(points[(instance_id, metric.key)]))
-        for instance_id in ids
-        for metric in METRICS
-    ]
-
-def configuration_effective_since(
-    connection: Connection,
-    instance_scope: resources.Scope,
-    instance_ids: Iterable[str],
-) -> dict[str, datetime | None]:
-    """When each instance's current configuration took effect: its last detected spec change.
-
-    None means no spec change was ever detected, so every stored hour belongs to it.
-    """
-    placeholders, ids = _instance_filter(instance_ids)
-    since: dict[str, datetime | None] = dict.fromkeys(ids)
-    if not ids:
-        return since
-    with connection.cursor() as cursor:
-        cursor.execute(
-            "SELECT r.resource_id, c.detected_at, c.field_changes FROM resource_changes c "
-            "JOIN resources r ON r.id = c.resource_ref "
-            "WHERE r.account_ref = %s AND r.region = %s AND r.service = %s AND r.resource_type = %s "
-            f"AND r.resource_id IN ({placeholders}) AND c.change_type = 'modified' ORDER BY c.detected_at",
-            [instance_scope.account_ref, instance_scope.region, instance_scope.service,
-             instance_scope.resource_type, *ids],
-        )
-        for instance_id, detected_at, field_changes in cursor.fetchall():
-            if any(item["field"] in SPEC_FIELDS for item in json.loads(field_changes)):
-                since[instance_id] = from_db(detected_at)
-    return since
-
-
-def load_points_since(
-    connection: Connection,
-    instance_scope: resources.Scope,
-    since: dict[str, datetime | None],
-) -> dict[SeriesKey, list[Datapoint]]:
-    """Every stored hourly average of each instance from its `since` time (or all of them)."""
-    placeholders, ids = _instance_filter(since)
-    if not ids:
-        return {}
-    with connection.cursor() as cursor:
-        cursor.execute(
-            "SELECT r.resource_id, d.metric, d.period_start, d.average "
-            "FROM ec2_metric_datapoints d JOIN resources r ON r.id = d.resource_ref "
-            "WHERE r.account_ref = %s AND r.region = %s AND r.service = %s AND r.resource_type = %s "
-            f"AND r.resource_id IN ({placeholders}) ORDER BY d.period_start",
-            [instance_scope.account_ref, instance_scope.region, instance_scope.service,
-             instance_scope.resource_type, *ids],
-        )
-        rows = cursor.fetchall()
-
-    points: dict[SeriesKey, list[Datapoint]] = defaultdict(list)
-    for instance_id, metric_key, period_start, average in rows:
-        moment = from_db(period_start)
-        start = since.get(instance_id)
-        if start is None or moment >= start:
-            points[(instance_id, metric_key)].append(Datapoint(moment, average))
-    return points
-
-
-def save_cumulative(
-    connection: Connection,
-    target: MetricTarget,
-    instance_id: str,
-    metric: MetricDefinition,
-    version: str,
-    effective_since: datetime | None,
-    summary: CumulativeSummary,
-    run_id: int,
-    updated_at: datetime,
-) -> None:
-    """Insert or rebuild the cumulative summary of one series for its configuration version."""
-    columns = {
-        "resource_ref": target.ref,
-        "instance_id": instance_id,
-        "instance_name": target.name or None,
-        "metric": metric.key,
-        "configuration_version": version,
-        "effective_since": to_db(effective_since),
-        "evidence_start": to_db(summary.evidence_start),
-        "evidence_end": to_db(summary.evidence_end),
-        "datapoint_count": summary.datapoint_count,
-        "value_sum": summary.value_sum,
-        "average": summary.average,
-        "minimum": summary.minimum,
-        "maximum": summary.maximum,
-        "p50": summary.p50,
-        "p95": summary.p95,
-        "p99": summary.p99,
-        "standard_deviation": summary.standard_deviation,
-        "trend": summary.trend,
-        "volatility": summary.volatility,
-        "coverage_percent": summary.coverage_percent,
-        "gap_count": summary.gap_count,
-        "run_id": run_id,
-        "updated_at": to_db(updated_at),
-    }
-    keys = ("resource_ref", "metric", "configuration_version")
-    names = ", ".join(columns)
-    placeholders = ", ".join(["%s"] * len(columns))
-    updates = ", ".join(f"{name} = new.{name}" for name in columns if name not in keys)
-    with connection.cursor() as cursor:
-        cursor.execute(
-            f"INSERT INTO ec2_metric_cumulative ({names}) VALUES ({placeholders}) AS new "
-            f"ON DUPLICATE KEY UPDATE {updates}",
-            tuple(columns.values()),
-        )
+# Metric storage is shared with Azure (app/db/metrics.py); these are the EC2 tables.
+TABLES = MetricTables("ec2", METRICS, SPEC_FIELDS)
+metric_targets = TABLES.metric_targets
+load_coverage = TABLES.load_coverage
+save_datapoints = TABLES.save_datapoints
+record_fetch = TABLES.record_fetch
+record_collection = TABLES.record_collection
+load_series = TABLES.load_series
+configuration_effective_since = TABLES.configuration_effective_since
+load_points_since = TABLES.load_points_since
+save_cumulative = TABLES.save_cumulative

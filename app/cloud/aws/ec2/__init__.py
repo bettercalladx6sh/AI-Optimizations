@@ -7,12 +7,12 @@ from app.cloud.aws.ec2.configuration import (
     get_configurations,
     print_configurations,
 )
-from app.cloud.aws.ec2.cumulative import CumulativeSummary, summarize
+from app.cloud.cumulative import CumulativeSummary, summarize
 from app.cloud.aws.ec2.evidence import SCHEMA_PATH, SCHEMA_VERSION, build_evidence, validate_evidence
 from app.cloud.aws.ec2.instances import Ec2Instance, list_instances, print_instances
 from app.cloud.aws.ec2.metrics import METRICS, MetricSeries, fetch, plan_requests
 from app.cloud.aws.ec2.utilization import UtilizationReport, analyze
-from app.cloud.aws.ec2.windows import ANALYSIS_WINDOWS, AnalysisWindow
+from app.cloud.windows import ANALYSIS_WINDOWS, AnalysisWindow
 
 __all__ = [
     "ANALYSIS_WINDOWS",

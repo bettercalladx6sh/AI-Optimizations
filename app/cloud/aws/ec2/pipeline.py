@@ -33,16 +33,17 @@ from typing import Any
 
 from app.auth import aws_auth
 from app.auth.common import AuthError, console, hint, status
+from app.cloud import evidence_output
 from app.cloud.aws.ec2 import analysis
 from app.cloud.aws.ec2.evidence import SCHEMA_VERSION, build_evidence, validate_evidence
-from app.cloud.aws.ec2.windows import ANALYSIS_WINDOWS, DEFAULT_WINDOW
-from app.cloud.display import plural
-from app.cloud.files import PROJECT_ROOT, display_path, write_json
-from app.cloud.schema import EvidenceValidationError, ValidationIssue
+from app.cloud.display import StepPrinter
+from app.cloud.evidence_output import EVIDENCE_DIR, MAX_ISSUES_SHOWN, OUTPUT_STEPS, print_issues
+from app.cloud.windows import ANALYSIS_WINDOWS, DEFAULT_WINDOW
 
-STEPS = (*analysis.STEPS, "Prepare evidence", "Validate evidence schema", "Update evidence file")
-EVIDENCE_DIR = PROJECT_ROOT / "evidence"
-MAX_ISSUES_SHOWN = 25
+STEPS = (*analysis.STEPS, *OUTPUT_STEPS)
+
+__all__ = ["EVIDENCE_DIR", "MAX_ISSUES_SHOWN", "STEPS", "PipelineResult", "StepPrinter", "add_arguments",
+           "default_path", "main", "print_issues", "run_pipeline", "validate_file"]
 
 
 @dataclass(frozen=True)
@@ -54,39 +55,9 @@ class PipelineResult:
     path: Path | None
 
 
-class StepPrinter:
-    """Prints '✔ 3/9 Title · detail' as each step completes, and the failed step on error."""
-
-    def __init__(self, titles: tuple[str, ...]) -> None:
-        self.titles = titles
-        self.done = 0
-        self.width = max(len(title) for title in titles)
-        self.digits = len(str(len(titles)))
-
-    def __call__(self, title: str, detail: str) -> None:
-        self.done += 1
-        console.print(
-            f"[bold green]✔[/] [dim]{self.done:>{self.digits}}/{len(self.titles)}[/] {title:<{self.width}}  [dim]{detail}[/]"
-        )
-
-    def failed(self, message: str, hints: tuple[str, ...] = ()) -> None:
-        title = self.titles[min(self.done, len(self.titles) - 1)]
-        console.print(f"[bold red]✘[/] [dim]{self.done + 1:>{self.digits}}/{len(self.titles)}[/] {title:<{self.width}}  [red]{message}[/]")
-        hint(hints)
-
-
 def default_path(document: dict[str, Any]) -> Path:
     """evidence/aws/ec2/<account>/<region>/<window>.json under the project root, e.g. .../30d.json."""
-    source = document["source"]
-    window = document["analysis_window"]["key"]
-    return EVIDENCE_DIR / "aws" / "ec2" / source["account_id"] / source["region"] / f"{window}.json"
-
-
-def print_issues(issues: list[ValidationIssue]) -> None:
-    for issue in issues[:MAX_ISSUES_SHOWN]:
-        console.print(f"    [red]•[/] {issue}", highlight=False)
-    if len(issues) > MAX_ISSUES_SHOWN:
-        console.print(f"    [dim]… and {len(issues) - MAX_ISSUES_SHOWN} more[/]")
+    return evidence_output.evidence_path(document)
 
 
 def run_pipeline(
@@ -98,31 +69,9 @@ def run_pipeline(
 ) -> PipelineResult:
     """Run all nine steps and return the analysis result and the validated evidence."""
     steps = steps or StepPrinter(STEPS)
-
     result = analysis.run_analysis(window_key, region, on_step=steps)
-
     evidence = build_evidence(result)
-    size = len(json.dumps(evidence))
-    issue_count = sum(len(instance["data_quality"]["issues"]) for instance in evidence["instances"])
-    steps(STEPS[6], f"{plural(len(evidence['instances']), 'instance')} · "
-                    f"{plural(issue_count, 'data-quality issue')} · {size / 1024:.1f} KB")
-
-    issues = validate_evidence(evidence)
-    if issues:
-        raise EvidenceValidationError(
-            f"evidence failed validation with {plural(len(issues), 'issue')}; no file was written",
-            [str(issue) for issue in issues[:MAX_ISSUES_SHOWN]],
-        )
-    steps(STEPS[7], f"schema {SCHEMA_VERSION} · valid")
-
-    path = None
-    if write_file:
-        path = output or default_path(evidence)
-        updated = write_json(evidence, path)
-        steps(STEPS[8], f"{'updated' if updated else 'created'} {display_path(path)}")
-    else:
-        steps(STEPS[8], "skipped (--no-file) · evidence kept in memory for this run")
-
+    path = evidence_output.publish(evidence, validate_evidence, SCHEMA_VERSION, steps, output, write_file)
     return PipelineResult(result, evidence, path)
 
 
@@ -176,29 +125,8 @@ def main(args: argparse.Namespace) -> int:
 
 
 def validate_file(path: Path) -> int:
-    """Validate an evidence JSON file; exit code 0 when valid, 1 otherwise."""
-    try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        status(False, f"{path}: file not found")
-        return 1
-    except json.JSONDecodeError as exc:
-        status(False, f"{path}: not valid JSON ({exc})")
-        return 1
-    try:
-        issues = validate_evidence(document)
-    except AuthError as exc:
-        status(False, str(exc))
-        return 1
-    except (KeyError, TypeError, ValueError) as exc:
-        status(False, f"{path}: unexpected structure ({exc})")
-        return 1
-    if issues:
-        status(False, f"{path}: {plural(len(issues), 'issue')} against schema {SCHEMA_VERSION}")
-        print_issues(issues)
-        return 1
-    status(True, f"{path}: valid evidence (schema {SCHEMA_VERSION}, {plural(len(document['instances']), 'instance')})")
-    return 0
+    """Validate an EC2 evidence JSON file; exit code 0 when valid, 1 otherwise."""
+    return evidence_output.validate_file(path, validate_evidence, SCHEMA_VERSION)
 
 
 if __name__ == "__main__":

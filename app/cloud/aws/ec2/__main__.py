@@ -32,7 +32,7 @@ from app.cloud.aws.ec2 import pipeline, utilization
 from app.cloud.aws.ec2.analysis import get_history, print_analysis, print_history, run_analysis
 from app.cloud.aws.ec2.configuration import get_configurations, print_configurations
 from app.cloud.aws.ec2.instances import DEFAULT_STATES, INSTANCE_STATES, list_instances, print_instances
-from app.cloud.aws.ec2.windows import ANALYSIS_WINDOWS, DEFAULT_WINDOW
+from app.cloud.windows import ANALYSIS_WINDOWS, DEFAULT_WINDOW
 from app.cloud.display import print_header
 
 DEFAULT_COMMAND = "list"

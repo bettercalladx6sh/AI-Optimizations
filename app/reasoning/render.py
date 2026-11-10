@@ -7,7 +7,7 @@ from typing import Any
 from rich.markup import escape
 
 from app.auth.common import console
-from app.cloud.aws.ec2.windows import span_label
+from app.cloud.windows import span_label
 from app.cloud.display import field, field_list, plural
 
 DECISIONS = {

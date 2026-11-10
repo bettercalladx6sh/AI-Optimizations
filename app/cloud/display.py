@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 from rich.markup import escape
 
-from app.auth.common import console
+from app.auth.common import console, hint
 
 NOT_SET = "—"
 LABEL_WIDTH = 18
@@ -70,3 +70,24 @@ def format_duration(delta: timedelta) -> str:
 def format_time(moment: datetime | None) -> str:
     """Return e.g. '2026-11-10 07:00 UTC', or an empty string."""
     return f"{moment.astimezone(timezone.utc):%Y-%m-%d %H:%M} UTC" if moment else ""
+
+
+class StepPrinter:
+    """Prints '✔ 3/9 Title · detail' as each step completes, and the failed step on error."""
+
+    def __init__(self, titles: tuple[str, ...]) -> None:
+        self.titles = titles
+        self.done = 0
+        self.width = max(len(title) for title in titles)
+        self.digits = len(str(len(titles)))
+
+    def __call__(self, title: str, detail: str) -> None:
+        self.done += 1
+        console.print(
+            f"[bold green]✔[/] [dim]{self.done:>{self.digits}}/{len(self.titles)}[/] {title:<{self.width}}  [dim]{detail}[/]"
+        )
+
+    def failed(self, message: str, hints: tuple[str, ...] = ()) -> None:
+        title = self.titles[min(self.done, len(self.titles) - 1)]
+        console.print(f"[bold red]✘[/] [dim]{self.done + 1:>{self.digits}}/{len(self.titles)}[/] {title:<{self.width}}  [red]{message}[/]")
+        hint(hints)

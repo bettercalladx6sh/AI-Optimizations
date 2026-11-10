@@ -18,7 +18,7 @@ from pathlib import Path
 from app.auth import aws_auth
 from app.auth.common import AuthError, console, hint, status
 from app.cloud.aws.ec2 import pipeline
-from app.cloud.aws.ec2.windows import ANALYSIS_WINDOWS, DEFAULT_WINDOW
+from app.cloud.windows import ANALYSIS_WINDOWS, DEFAULT_WINDOW
 from app.cloud.display import plural
 from app.cloud.files import display_path
 from app.reasoning import engine, render

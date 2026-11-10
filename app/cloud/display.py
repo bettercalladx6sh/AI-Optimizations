@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from datetime import datetime, timezone
+
 from rich.markup import escape
 
 from app.auth.common import console
@@ -47,3 +49,12 @@ def field_list(label: str, values: Iterable[object], indent: int = 2) -> None:
     field(label, items[0], indent=indent)
     for value in items[1:]:
         field("", value, indent=indent)
+
+def plural(count: int, word: str) -> str:
+    """Return e.g. '1 hour', '24 hours'."""
+    return f"{count} {word}{'' if count == 1 else 's'}"
+
+
+def format_time(moment: datetime | None) -> str:
+    """Return e.g. '2026-11-10 07:00 UTC', or an empty string."""
+    return f"{moment.astimezone(timezone.utc):%Y-%m-%d %H:%M} UTC" if moment else ""

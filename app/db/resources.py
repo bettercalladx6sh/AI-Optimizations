@@ -132,11 +132,12 @@ def fail_run(connection: Connection, run_id: int, finished_at: datetime, message
 
 
 def last_run_at(connection: Connection, scope: Scope) -> datetime | None:
-    """Return when the previous successful run for this scope started."""
+    """Return when the previous successful full run for this scope started (quick 'adhoc' ones excluded)."""
     with connection.cursor() as cursor:
         cursor.execute(
             "SELECT MAX(started_at) FROM analysis_runs "
-            "WHERE account_ref = %s AND region = %s AND service = %s AND status = 'succeeded'",
+            "WHERE account_ref = %s AND region = %s AND service = %s AND status = 'succeeded' "
+            "AND purpose <> 'adhoc'",
             (scope.account_ref, scope.region, scope.service),
         )
         (started_at,) = cursor.fetchone()

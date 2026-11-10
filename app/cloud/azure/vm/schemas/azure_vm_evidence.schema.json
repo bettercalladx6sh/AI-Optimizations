@@ -1,0 +1,867 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cost-optimizer.local/schemas/azure/vm/evidence/1.0",
+  "title": "Azure VM rightsizing evidence",
+  "description": "Evidence for one Azure subscription (one location, or all) built from one analysis run: per-VM configuration, changes, evaluation readiness, hourly CPU/memory statistics and data-quality issues. Same instance blocks as the EC2 evidence (instance_id = the VM's vmId, instance_type = the VM size). Input for AI rightsizing evaluation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "evidence_id",
+    "generated_at",
+    "source",
+    "analysis_window",
+    "metric_definitions",
+    "collection",
+    "summary",
+    "instances"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "evidence_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "generated_at": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "service",
+        "account_id",
+        "subscription_name",
+        "tenant_id",
+        "region",
+        "analysis_run_id"
+      ],
+      "properties": {
+        "provider": {
+          "const": "azure"
+        },
+        "service": {
+          "const": "vm"
+        },
+        "account_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "description": "subscription ID"
+        },
+        "subscription_name": {
+          "type": "string"
+        },
+        "tenant_id": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$"
+        },
+        "region": {
+          "type": "string",
+          "pattern": "^(all|[a-z0-9]+)$",
+          "description": "Azure location, or 'all' for every location"
+        },
+        "analysis_run_id": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "analysis_window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "purpose",
+        "description",
+        "start",
+        "end",
+        "hours",
+        "required_stable_days"
+      ],
+      "properties": {
+        "key": {
+          "type": "string",
+          "pattern": "^[a-z0-9]{1,16}$",
+          "description": "window key from app/config.py"
+        },
+        "purpose": {
+          "enum": [
+            "production",
+            "testing"
+          ]
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "start": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "end": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "hours": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "required_stable_days": {
+          "type": "number",
+          "minimum": 0,
+          "description": "real span of the window in days; the current configuration must cover all of it"
+        }
+      }
+    },
+    "metric_definitions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "key",
+          "label",
+          "namespace",
+          "metric_name",
+          "statistic",
+          "period_seconds",
+          "unit"
+        ],
+        "properties": {
+          "key": {
+            "$ref": "#/$defs/metricKey"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1
+          },
+          "namespace": {
+            "type": "string",
+            "minLength": 1
+          },
+          "metric_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "statistic": {
+            "const": "Average"
+          },
+          "period_seconds": {
+            "const": 3600
+          },
+          "unit": {
+            "const": "Percent"
+          }
+        }
+      }
+    },
+    "collection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "api_calls",
+        "metric_queries",
+        "memory_source",
+        "datapoints_expected",
+        "datapoints_available",
+        "datapoints_fetched_now",
+        "hours_without_data"
+      ],
+      "properties": {
+        "api_calls": {
+          "$ref": "#/$defs/count",
+          "description": "Azure Monitor metric calls and Log Analytics queries"
+        },
+        "metric_queries": {
+          "$ref": "#/$defs/count"
+        },
+        "memory_source": {
+          "enum": [
+            "log_analytics",
+            "platform_metric"
+          ]
+        },
+        "datapoints_expected": {
+          "$ref": "#/$defs/count"
+        },
+        "datapoints_available": {
+          "$ref": "#/$defs/count"
+        },
+        "datapoints_fetched_now": {
+          "$ref": "#/$defs/count"
+        },
+        "hours_without_data": {
+          "$ref": "#/$defs/count"
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "instance_count",
+        "instances_by_state",
+        "ready_for_evaluation",
+        "waiting_for_evaluation",
+        "configuration_changes",
+        "instances_with_issues"
+      ],
+      "properties": {
+        "instance_count": {
+          "$ref": "#/$defs/count"
+        },
+        "instances_by_state": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/state"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/count"
+          }
+        },
+        "ready_for_evaluation": {
+          "$ref": "#/$defs/count"
+        },
+        "waiting_for_evaluation": {
+          "$ref": "#/$defs/count"
+        },
+        "configuration_changes": {
+          "$ref": "#/$defs/count"
+        },
+        "instances_with_issues": {
+          "$ref": "#/$defs/count"
+        }
+      }
+    },
+    "instances": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/instance"
+      }
+    }
+  },
+  "$defs": {
+    "timestamp": {
+      "description": "UTC timestamp, e.g. 2026-11-10T07:00:00Z",
+      "type": "string",
+      "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$"
+    },
+    "nullableTimestamp": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/timestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "percent": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "nullablePercent": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/percent"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "metricKey": {
+      "enum": [
+        "cpu_utilization",
+        "memory_utilization"
+      ]
+    },
+    "state": {
+      "enum": [
+        "running",
+        "starting",
+        "stopping",
+        "stopped",
+        "deallocating",
+        "deallocated",
+        "unknown"
+      ]
+    },
+    "instance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "instance_id",
+        "name",
+        "state",
+        "configuration",
+        "changes",
+        "evaluation",
+        "metrics",
+        "data_quality"
+      ],
+      "properties": {
+        "instance_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "description": "the VM's vmId"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/state"
+        },
+        "configuration": {
+          "$ref": "#/$defs/configuration"
+        },
+        "changes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/change"
+          }
+        },
+        "evaluation": {
+          "$ref": "#/$defs/evaluation"
+        },
+        "metrics": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/metricKey"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/metric"
+          },
+          "minProperties": 1
+        },
+        "data_quality": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "issues"
+          ],
+          "properties": {
+            "issues": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/issue"
+              }
+            }
+          }
+        }
+      }
+    },
+    "configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "effective_since",
+        "instance_type",
+        "family",
+        "vcpus",
+        "memory_gib",
+        "burstable",
+        "architecture",
+        "os_type",
+        "image",
+        "marketplace_plan",
+        "license_type",
+        "priority",
+        "eviction_policy",
+        "location",
+        "zone",
+        "resource_group",
+        "availability_set",
+        "scale_set",
+        "dedicated_host",
+        "time_created",
+        "storage",
+        "tags"
+      ],
+      "properties": {
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "effective_since": {
+          "$ref": "#/$defs/nullableTimestamp"
+        },
+        "instance_type": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "description": "VM size, e.g. Standard_D2s_v3"
+        },
+        "family": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "vcpus": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "memory_gib": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "exclusiveMinimum": 0
+        },
+        "burstable": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "architecture": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "os_type": {
+          "enum": [
+            "Linux",
+            "Windows",
+            null
+          ]
+        },
+        "image": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "marketplace_plan": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "license_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "priority": {
+          "enum": [
+            "Regular",
+            "Spot",
+            "Low",
+            null
+          ]
+        },
+        "eviction_policy": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "location": {
+          "type": "string",
+          "minLength": 1
+        },
+        "zone": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resource_group": {
+          "type": "string",
+          "minLength": 1
+        },
+        "availability_set": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scale_set": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dedicated_host": {
+          "type": "boolean"
+        },
+        "time_created": {
+          "$ref": "#/$defs/nullableTimestamp"
+        },
+        "storage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "total_gib",
+            "disks"
+          ],
+          "properties": {
+            "total_gib": {
+              "$ref": "#/$defs/count"
+            },
+            "disks": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "name",
+                  "role",
+                  "lun",
+                  "size_gib",
+                  "sku",
+                  "iops",
+                  "throughput_mbps",
+                  "encryption",
+                  "delete_option"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "role": {
+                    "enum": [
+                      "os",
+                      "data"
+                    ]
+                  },
+                  "lun": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "size_gib": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 1
+                  },
+                  "sku": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "iops": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "throughput_mbps": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "encryption": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "delete_option": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "tags": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "change": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "significant",
+        "fields"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "added",
+            "modified"
+          ]
+        },
+        "significant": {
+          "type": "boolean"
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "field",
+              "before",
+              "after"
+            ],
+            "properties": {
+              "field": {
+                "type": "string",
+                "minLength": 1
+              },
+              "before": {
+                "type": [
+                  "string",
+                  "number",
+                  "boolean",
+                  "array",
+                  "null"
+                ]
+              },
+              "after": {
+                "type": [
+                  "string",
+                  "number",
+                  "boolean",
+                  "array",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "evaluation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ready",
+        "reason",
+        "since",
+        "ready_at",
+        "remaining_hours"
+      ],
+      "properties": {
+        "ready": {
+          "type": "boolean"
+        },
+        "reason": {
+          "enum": [
+            "stable",
+            "launched",
+            "changed",
+            "added",
+            "not_measured"
+          ]
+        },
+        "since": {
+          "$ref": "#/$defs/nullableTimestamp"
+        },
+        "ready_at": {
+          "$ref": "#/$defs/nullableTimestamp"
+        },
+        "remaining_hours": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        }
+      }
+    },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "data_status",
+        "window",
+        "cumulative"
+      ],
+      "properties": {
+        "data_status": {
+          "enum": [
+            "available",
+            "no_data"
+          ]
+        },
+        "window": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "expected_hours",
+            "available_hours",
+            "coverage_percent"
+          ],
+          "properties": {
+            "expected_hours": {
+              "$ref": "#/$defs/count"
+            },
+            "available_hours": {
+              "$ref": "#/$defs/count"
+            },
+            "coverage_percent": {
+              "$ref": "#/$defs/percent"
+            }
+          }
+        },
+        "cumulative": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/cumulative"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "cumulative": {
+      "description": "Statistics over every stored hourly average since the current configuration took effect.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "datapoint_count",
+        "evidence_start",
+        "evidence_end",
+        "value_sum",
+        "average",
+        "minimum",
+        "maximum",
+        "p50",
+        "p95",
+        "p99",
+        "standard_deviation",
+        "trend",
+        "volatility",
+        "coverage_percent",
+        "gap_count"
+      ],
+      "properties": {
+        "datapoint_count": {
+          "$ref": "#/$defs/count"
+        },
+        "evidence_start": {
+          "$ref": "#/$defs/nullableTimestamp"
+        },
+        "evidence_end": {
+          "$ref": "#/$defs/nullableTimestamp"
+        },
+        "value_sum": {
+          "type": "number",
+          "minimum": 0
+        },
+        "average": {
+          "$ref": "#/$defs/nullablePercent"
+        },
+        "minimum": {
+          "$ref": "#/$defs/nullablePercent"
+        },
+        "maximum": {
+          "$ref": "#/$defs/nullablePercent"
+        },
+        "p50": {
+          "$ref": "#/$defs/nullablePercent"
+        },
+        "p95": {
+          "$ref": "#/$defs/nullablePercent"
+        },
+        "p99": {
+          "$ref": "#/$defs/nullablePercent"
+        },
+        "standard_deviation": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "trend": {
+          "enum": [
+            "GROWING",
+            "STABLE",
+            "DECLINING",
+            null
+          ]
+        },
+        "volatility": {
+          "enum": [
+            "LOW",
+            "MODERATE",
+            "HIGH",
+            "STABLE",
+            null
+          ]
+        },
+        "coverage_percent": {
+          "$ref": "#/$defs/percent"
+        },
+        "gap_count": {
+          "$ref": "#/$defs/count"
+        }
+      }
+    },
+    "issue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "metric",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "enum": [
+            "METRIC_MISSING",
+            "LOW_COVERAGE",
+            "LIMITED_HISTORY",
+            "RECENTLY_CHANGED",
+            "RECENTLY_LAUNCHED",
+            "INSTANCE_STOPPED"
+          ]
+        },
+        "metric": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/metricKey"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

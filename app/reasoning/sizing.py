@@ -5,7 +5,8 @@ Capacity (from cumulative p95 utilization and safety factors):
     required memory  = current memory x memory p95 x memory safety factor
 
 Candidates are every size of the instance's own family (same architecture and behaviour),
-read from EC2 DescribeInstanceTypes. A candidate is safe only if it provides at least the
+supplied by the provider adapter (app/reasoning/providers.py): EC2 DescribeInstanceTypes
+(family_sizes below) or Azure Compute Resource SKUs. A candidate is safe only if it provides at least the
 required vCPU and memory. The smallest safe size decides:
     smaller than current  -> DOWNSIZE_CANDIDATE
     the current size      -> KEEP_CURRENT
@@ -126,15 +127,14 @@ def validate(size: InstanceSize, capacity: Capacity) -> Candidate:
 
 
 def size_instance(
-    region: str,
+    family: tuple[InstanceSize, ...],
     current: InstanceSize,
     cpu_p95: float,
     memory_p95: float,
 ) -> SizingResult:
     """Compute capacity, validate every family size and take the rule-based decision."""
-    family = current.instance_type.split(".", 1)[0]
     capacity = capacity_for(current, cpu_p95, memory_p95)
-    sizes = family_sizes(region, family) or (current,)
+    sizes = family or (current,)
     candidates = tuple(validate(size, capacity) for size in sizes)
     safe = [candidate.size for candidate in candidates if candidate.safe]
 

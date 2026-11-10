@@ -25,9 +25,9 @@ def window_label(window: dict[str, Any]) -> str:
     return span_label(window["key"], window["purpose"], window["description"], window["hours"])
 
 
-def print_title(label: str, region: str) -> None:
+def print_title(label: str, region: str, service: str = "EC2") -> None:
     console.print()
-    console.print(f"[bold]Cloudpositive AI Engine[/] [dim]·[/] EC2 rightsizing [dim]·[/] {escape(region)} [dim]·[/] "
+    console.print(f"[bold]Cloudpositive AI Engine[/] [dim]·[/] {service} rightsizing [dim]·[/] {escape(region)} [dim]·[/] "
                   f"{escape(label)}")
     console.print()
 
@@ -52,7 +52,7 @@ def _metric(metric: dict[str, Any]) -> tuple[str, str]:
     return text, "green" if metric["sufficient"] else "yellow"
 
 
-def print_instance(item: dict[str, Any]) -> None:
+def print_instance(item: dict[str, Any], price_kind: str = "on-demand") -> None:
     label, style = DECISIONS[item["decision"]]
     cost = item["pricing"] or {}
     console.print(f"[bold]{escape(item['name'] or '(no name)')}[/] [dim]· {item['instance_id']} · "
@@ -75,7 +75,7 @@ def print_instance(item: dict[str, Any]) -> None:
     if savings is not None:
         verb, value = ("saves", savings) if savings >= 0 else ("adds", -savings)
         field("Estimated cost", f"{verb} {_money(value)} ({abs(cost['savings_percent'] or 0):.1f}%) · "
-                                f"on-demand {cost['operating_system']} list price", "green" if savings >= 0 else "yellow")
+                                f"{price_kind} {cost['operating_system']} list price", "green" if savings >= 0 else "yellow")
     elif cost.get("reason"):
         field("Pricing", f"not available · {cost['reason']}", "yellow")
     meta = DECIDED_BY[item["decided_by"]]
@@ -95,15 +95,15 @@ def print_instance(item: dict[str, Any]) -> None:
     console.print()
 
 
-def print_report(report: dict[str, Any]) -> None:
+def print_report(report: dict[str, Any], price_kind: str = "on-demand") -> None:
     for item in report["recommendations"]:
-        print_instance(item)
+        print_instance(item, price_kind)
     summary = report["summary"]
     counts = " · ".join(f"[{DECISIONS[decision][1]}]{count} {DECISIONS[decision][0].lower()}[/]"
                         for decision, count in summary["by_decision"].items())
     console.print(f"[bold]{plural(summary['instance_count'], 'instance')}[/] [dim]·[/] {counts}")
     if summary["estimated_monthly_savings_usd"] is not None:
         console.print(f"[bold green]Estimated savings {_money(summary['estimated_monthly_savings_usd'])}[/] "
-                      f"[dim]if every downsize candidate is applied (on-demand list prices)[/]")
+                      f"[dim]if every downsize candidate is applied ({price_kind} list prices)[/]")
     if summary["actionable"] == 0:
         console.print("[dim]No size change is recommended yet; sizes are suggested only with sufficient evidence.[/]")

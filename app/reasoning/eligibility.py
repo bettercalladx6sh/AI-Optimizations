@@ -20,6 +20,7 @@ from typing import Any
 from app.config import MIN_COVERAGE_PERCENT, MIN_EVIDENCE_HOURS
 
 METRIC_LABELS = {"cpu_utilization": "CPU", "memory_utilization": "Memory"}
+EC2_MEMORY_EVIDENCE = "Memory utilization (CloudWatch agent publishing EC2/Custom mem_used_percent)"
 
 
 @dataclass(frozen=True)
@@ -80,9 +81,9 @@ def metrics_of(instance: dict[str, Any]) -> dict[str, MetricEvidence]:
     return {key: MetricEvidence.from_evidence(key, data) for key, data in instance["metrics"].items()}
 
 
-def _metric_reason(metric: MetricEvidence) -> str | None:
+def _metric_reason(metric: MetricEvidence, monitor: str) -> str | None:
     if metric.datapoints == 0 or metric.p95 is None:
-        return f"{metric.label} metric has no datapoints in CloudWatch for this configuration."
+        return f"{metric.label} metric has no datapoints in {monitor} for this configuration."
     if metric.available_hours < MIN_EVIDENCE_HOURS:
         return (
             f"{metric.label} evidence covers {metric.available_hours:.1f} / {metric.expected_hours:.1f} hours, "
@@ -96,8 +97,16 @@ def _metric_reason(metric: MetricEvidence) -> str | None:
     return None
 
 
-def check(instance: dict[str, Any], window: dict[str, Any]) -> Eligibility:
-    """Apply the evidence rules to one evidence instance; `window` is the evidence analysis_window."""
+def check(
+    instance: dict[str, Any],
+    window: dict[str, Any],
+    monitor: str = "CloudWatch",
+    memory_evidence: str = EC2_MEMORY_EVIDENCE,
+) -> Eligibility:
+    """Apply the evidence rules to one evidence instance; `window` is the evidence analysis_window.
+
+    `monitor` names where metrics come from, `memory_evidence` what collects memory (per provider).
+    """
     state = instance["state"]
     evaluation = instance["evaluation"]
     span = f"{window['key']} window ({window['description']}, {window['hours']} hours)"
@@ -125,19 +134,19 @@ def check(instance: dict[str, Any], window: dict[str, Any]) -> Eligibility:
         )
 
     metrics = metrics_of(instance)
-    reasons = [reason for metric in metrics.values() if (reason := _metric_reason(metric))]
+    reasons = [reason for metric in metrics.values() if (reason := _metric_reason(metric, monitor))]
     if reasons:
         missing = []
         for metric in metrics.values():
             if metric.datapoints == 0 and metric.key == "memory_utilization":
-                missing.append("Memory utilization (CloudWatch agent publishing EC2/Custom mem_used_percent)")
+                missing.append(memory_evidence)
             elif not metric.sufficient:
                 missing.append(f"{metric.label} utilization covering at least {MIN_COVERAGE_PERCENT:g}% of the window")
         return Eligibility(
             eligible=False,
             reasons=tuple(reasons),
             missing_evidence=tuple(missing),
-            action="Collect verified CloudWatch metrics for the full window before evaluating capacity.",
+            action=f"Collect verified {monitor} metrics for the full window before evaluating capacity.",
             eligible_after=None,
         )
 

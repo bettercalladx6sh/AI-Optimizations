@@ -25,8 +25,8 @@ from app.reasoning.config import MAX_AI_ATTEMPTS, ReasoningError, ReasoningSetti
 
 CAUTIOUS = ("KEEP_CURRENT", "INVESTIGATE")
 
-SYSTEM_PROMPT = """\
-You are a Senior AWS FinOps engineer for the Cloudpositive AI Engine. You review EC2
+PROMPT_TEMPLATE = """\
+You are a Senior {cloud} FinOps engineer for the Cloudpositive AI Engine. You review {service}
 rightsizing analyses and explain them so an operator can act on them safely.
 
 You receive, for ONE instance: its current configuration, CPU and memory evidence for the
@@ -37,7 +37,7 @@ recommended size, the rule-based decision, and the decisions you are allowed to 
 
 Rules:
 - Use only the supplied evidence. Never invent metrics, prices, savings, workload details,
-  or history. Prices are AWS on-demand list prices fetched for this run: quote them and the
+  or history. Prices are {prices} fetched for this run: quote them and the
   supplied monthly savings exactly; never compute other figures or mention Reserved, Spot
   or Savings Plans prices. When pricing.available is false, do not state any cost.
 - The rule-based decision and candidate validation are authoritative. You may return the
@@ -59,6 +59,17 @@ Fields:
 - missing_evidence: evidence that would raise confidence (empty list if none).
 - action: one sentence telling the operator what to do next.
 """
+
+
+
+def system_prompt(cloud: str, service: str, prices: str) -> str:
+    """The system prompt for one provider, e.g. ('Azure', 'Azure VM', 'Azure pay-as-you-go list prices')."""
+    return PROMPT_TEMPLATE.format(cloud=cloud, service=service, prices=prices)
+
+
+SYSTEM_PROMPT = system_prompt("AWS", "EC2", "AWS on-demand list prices")
+FORMAT_NAME = "ec2_rightsizing_reasoning"
+
 
 @dataclass(frozen=True)
 class AiResult:
@@ -117,13 +128,14 @@ class AiReasoner:
         self.model = settings.model
         self.client = client or OpenAI(api_key=settings.api_key)
 
-    def reason(self, payload: dict[str, Any]) -> AiResult:
+    def reason(self, payload: dict[str, Any], instructions: str = SYSTEM_PROMPT,
+               format_name: str = FORMAT_NAME) -> AiResult:
         allowed = allowed_decisions(payload["rule_based_decision"]["decision"])
         payload = {**payload, "allowed_decisions": allowed}
         feedback = None
 
         for attempt in range(1, MAX_AI_ATTEMPTS + 1):
-            text = self._call({**payload, "validation_feedback": feedback}, allowed)
+            text = self._call({**payload, "validation_feedback": feedback}, allowed, instructions, format_name)
             try:
                 data = json.loads(text)
                 problem = _check(data, allowed)
@@ -146,15 +158,15 @@ class AiReasoner:
             ("Run again; if it keeps failing, try another OPENAI_MODEL",),
         )
 
-    def _call(self, payload: dict[str, Any], allowed: list[str]) -> str:
+    def _call(self, payload: dict[str, Any], allowed: list[str], instructions: str, format_name: str) -> str:
         try:
             response = self.client.responses.create(
                 model=self.model,
-                instructions=SYSTEM_PROMPT,
+                instructions=instructions,
                 input=json.dumps(payload, sort_keys=True, default=str),
                 text={"format": {
                     "type": "json_schema",
-                    "name": "ec2_rightsizing_reasoning",
+                    "name": format_name,
                     "schema": response_schema(allowed),
                     "strict": True,
                 }},

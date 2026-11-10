@@ -7,6 +7,7 @@ from app.cloud.aws.ec2.configuration import (
     get_configurations,
     print_configurations,
 )
+from app.cloud.aws.ec2.cumulative import CumulativeSummary, summarize
 from app.cloud.aws.ec2.instances import Ec2Instance, list_instances, print_instances
 from app.cloud.aws.ec2.metrics import METRICS, MetricSeries, fetch, plan_requests
 from app.cloud.aws.ec2.utilization import UtilizationReport, analyze
@@ -16,6 +17,7 @@ __all__ = [
     "ANALYSIS_WINDOWS",
     "AnalysisResult",
     "AnalysisWindow",
+    "CumulativeSummary",
     "Ec2Instance",
     "InstanceChange",
     "InstanceConfiguration",
@@ -32,4 +34,5 @@ __all__ = [
     "print_configurations",
     "print_instances",
     "run_analysis",
+    "summarize",
 ]

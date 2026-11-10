@@ -10,6 +10,9 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Any
 
+import hashlib
+import json
+
 from rich.markup import escape
 
 from app.auth.common import console
@@ -41,6 +44,10 @@ TRACKED_FIELDS = {
 # Changes to these fields are stored but do not affect utilization, so they do not
 # restart the evaluation window.
 COSMETIC_FIELDS = frozenset({"name", "detailed_monitoring"})
+
+# Fields that define a configuration version: the instance's specs. Name, monitoring and
+# run state are not part of it, so a rename or a stop/start keeps the same version.
+SPEC_FIELDS = tuple(name for name in TRACKED_FIELDS if name not in COSMETIC_FIELDS | {"state"})
 
 KIND_STYLES = {
     "added": ("green", "+"),
@@ -118,6 +125,12 @@ class InstanceChange:
         if self.kind != "modified":
             return True
         return any(item.field not in COSMETIC_FIELDS for item in self.fields)
+
+
+def configuration_version(snapshot: InstanceSnapshot) -> str:
+    """SHA-256 of the instance's specs; changes only when type, size, storage, ... change."""
+    specs = {name: getattr(snapshot, name) for name in SPEC_FIELDS}
+    return hashlib.sha256(json.dumps(specs, sort_keys=True, default=list).encode("utf-8")).hexdigest()
 
 
 def snapshot_instance(config: InstanceConfiguration) -> InstanceSnapshot:

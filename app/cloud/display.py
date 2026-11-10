@@ -50,10 +50,9 @@ def field_list(label: str, values: Iterable[object], indent: int = 2) -> None:
     for value in items[1:]:
         field("", value, indent=indent)
 
-def plural(count: int, word: str) -> str:
-    """Return e.g. '1 hour', '24 hours'."""
-    return f"{count} {word}{'' if count == 1 else 's'}"
-
+def plural(count: int, word: str, many: str | None = None) -> str:
+    """Return e.g. '1 hour', '24 hours', or with an irregular form '2 queries'."""
+    return f"{count} {word if count == 1 else many or word + 's'}"
 
 def format_time(moment: datetime | None) -> str:
     """Return e.g. '2026-11-10 07:00 UTC', or an empty string."""

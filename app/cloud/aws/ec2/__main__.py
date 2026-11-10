@@ -5,11 +5,14 @@ Usage:
     python -m app.cloud.aws.ec2 list --state running         # list running only
     python -m app.cloud.aws.ec2 config                       # specs of all instances
     python -m app.cloud.aws.ec2 config -r i-0abc123          # one instance by ID or Name tag
-    python -m app.cloud.aws.ec2 run                          # analysis, 30d window (production)
-    python -m app.cloud.aws.ec2 run 90d                      # analysis, 90d window (production)
-    python -m app.cloud.aws.ec2 run 1h                       # analysis, 1h window (testing)
-    python -m app.cloud.aws.ec2 metrics                      # stored CPU/memory summary, 30d
-    python -m app.cloud.aws.ec2 metrics 1d -r i-0abc123 -H   # one instance, every hourly average
+    python -m app.cloud.aws.ec2 run                          # analysis, month to date (production)
+    python -m app.cloud.aws.ec2 run 90d                      # analysis, last 3 calendar months to date
+    python -m app.cloud.aws.ec2 run 1h                       # analysis, rolling 1h (testing)
+    python -m app.cloud.aws.ec2 metrics                      # quick: month to date, all instances
+    python -m app.cloud.aws.ec2 metrics -d yesterday         # quick: one day, every hour
+    python -m app.cloud.aws.ec2 metrics -t "2026-11-10 06"   # quick: one hour
+    python -m app.cloud.aws.ec2 metrics 7d -r api-01         # quick: one instance
+    python -m app.cloud.aws.ec2 metrics -o                   # quick, stored data only (no CloudWatch)
     python -m app.cloud.aws.ec2 history -r i-0abc123         # stored changes of one instance
     python -m app.cloud.aws.ec2 run 7d --region eu-west-1    # another region
 """
@@ -18,21 +21,16 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Callable
 
 from app.auth import aws_auth
-from app.auth.common import AuthError, hint, status
-from app.cloud.aws.ec2.analysis import (
-    ANALYSIS_WINDOWS,
-    DEFAULT_WINDOW,
-    get_history,
-    get_stored_metrics,
-    print_analysis,
-    print_history,
-    print_stored_metrics,
-    run_analysis,
-)
+from app.auth.common import AuthError, hint, status, warning
+from app.cloud.aws.ec2 import utilization
+from app.cloud.aws.ec2.analysis import get_history, print_analysis, print_history, run_analysis
 from app.cloud.aws.ec2.configuration import get_configurations, print_configurations
 from app.cloud.aws.ec2.instances import DEFAULT_STATES, INSTANCE_STATES, list_instances, print_instances
+from app.cloud.aws.ec2.windows import ANALYSIS_WINDOWS, DEFAULT_WINDOW
+from app.cloud.display import print_header
 
 DEFAULT_COMMAND = "list"
 DEFAULT_HISTORY_LIMIT = 20
@@ -48,12 +46,18 @@ def _run_configuration(args: argparse.Namespace, region: str) -> None:
 
 
 def _run_analysis(args: argparse.Namespace, region: str) -> None:
-    print_analysis(run_analysis(args.window, region))
+    print_analysis(run_analysis(args.window or DEFAULT_WINDOW, region))
 
 
 def _run_metrics(args: argparse.Namespace, region: str) -> None:
-    names, metrics = get_stored_metrics(args.window, region, args.resource)
-    print_stored_metrics(names, metrics, region, args.window, args.hourly)
+    window = ANALYSIS_WINDOWS[args.window or DEFAULT_WINDOW]
+    selection = args.day or args.hour or utilization.window_selection(window)
+    report = utilization.analyze(selection, region, args.resource, args.offline)
+    print_header("EC2 utilization", region, report.instances, selection.label)
+    if not report.series:
+        warning("No stored instances match; run an analysis first: python -m app.cloud.aws.ec2 run")
+        return
+    utilization.print_report(report, hourly=args.hourly or selection.key in ("day", "hour"))
 
 
 def _run_history(args: argparse.Namespace, region: str) -> None:
@@ -66,6 +70,16 @@ def _positive(value: str) -> int:
     if number < 1:
         raise argparse.ArgumentTypeError("must be 1 or more")
     return number
+
+
+def _selection(parse: Callable[[str], utilization.Selection]) -> Callable[[str], utilization.Selection]:
+    """argparse type for --day / --hour that reports bad values as usage errors."""
+    def convert(value: str) -> utilization.Selection:
+        try:
+            return parse(value)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(str(exc)) from None
+    return convert
 
 
 def _window_help() -> str:
@@ -126,7 +140,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     window_option.add_argument(
         "window",
         nargs="?",
-        default=DEFAULT_WINDOW,
         choices=list(ANALYSIS_WINDOWS),
         metavar="WINDOW",
         help=_window_help(),
@@ -145,7 +158,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "metrics",
         aliases=["usage"],
         parents=[region_option, window_option],
-        help="show stored hourly CPU/memory averages (no CloudWatch calls)",
+        help="quick analysis: fill only missing hours, then show datapoints and CPU/memory",
+    )
+    period = metrics_cmd.add_mutually_exclusive_group()
+    period.add_argument(
+        "-d", "--day",
+        type=_selection(utilization.day_selection),
+        metavar="DAY",
+        help="one UTC day: YYYY-MM-DD, today or yesterday (lists every hour)",
+    )
+    period.add_argument(
+        "-t", "--hour",
+        type=_selection(utilization.hour_selection),
+        metavar="HOUR",
+        help="one UTC hour: 'YYYY-MM-DD HH', or HH for today",
     )
     metrics_cmd.add_argument(
         "-r", "--resource",
@@ -156,6 +182,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "-H", "--hourly",
         action="store_true",
         help="also list every hourly average",
+    )
+    metrics_cmd.add_argument(
+        "-o", "--offline",
+        action="store_true",
+        help="use stored data only; make no CloudWatch calls",
     )
     metrics_cmd.set_defaults(run=_run_metrics)
 
@@ -178,7 +209,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     history_cmd.set_defaults(run=_run_history)
 
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if getattr(args, "window", None) and (getattr(args, "day", None) or getattr(args, "hour", None)):
+        parser.error("give either a WINDOW or --day/--hour, not both")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:

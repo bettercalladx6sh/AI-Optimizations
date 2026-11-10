@@ -7,7 +7,9 @@ later runs compare with the stored configuration and store each change.
 
 Metrics: the window (30d = month to date, 90d = last 3 calendar months to date, testing windows
 rolling) is checked against what is already stored, and only missing hours are requested from
-CloudWatch. A run where nothing is missing makes no CloudWatch calls.
+CloudWatch. A run where nothing is missing makes no CloudWatch calls. Every run then rebuilds
+the cumulative summary (cumulative average, percentiles, trend, volatility, ...) of each
+instance's current configuration from all stored hours.
 
 An instance can only be evaluated once a full window (30 days for 30d, ...) has passed since it
 was launched or last changed; until then clients are told to wait.
@@ -69,6 +71,7 @@ class AnalysisResult:
     changes: list[InstanceChange]
     readiness: list[Readiness]
     utilization: utilization.UtilizationReport
+    cumulative: list[utilization.CumulativeResult]
 
 
 @dataclass(frozen=True)
@@ -149,7 +152,8 @@ def _store_run(
 
 
 def run_analysis(window_key: str = DEFAULT_WINDOW, region: str | None = None) -> AnalysisResult:
-    """Run one analysis: configuration, changes, missing metric hours, availability, readiness.
+    """Run one analysis: configuration, changes, missing metric hours, availability,
+    cumulative summaries and readiness.
 
     The run is recorded first, so a failure is kept in analysis_runs with its error.
     """
@@ -186,6 +190,9 @@ def run_analysis(window_key: str = DEFAULT_WINDOW, region: str | None = None) ->
                 connection, instance_scope, start, end, measured_targets, coverage, requests, fetched
             )
             utilization.record_report(connection, run_id, measured_targets, report)
+            cumulative = utilization.update_cumulative(
+                connection, instance_scope, run_id, now, measured_targets, current
+            )
             resources.finish_run(
                 connection, run_id, datetime.now(timezone.utc), len(current), len(changes), first_run
             )
@@ -216,6 +223,7 @@ def run_analysis(window_key: str = DEFAULT_WINDOW, region: str | None = None) ->
         changes=changes,
         readiness=readiness,
         utilization=report,
+        cumulative=cumulative,
     )
 
 
@@ -244,7 +252,7 @@ def _print_readiness(item: Readiness) -> None:
 
 
 def print_analysis(result: AnalysisResult) -> None:
-    """Print the run summary, changes, datapoints, utilization and each instance's readiness."""
+    """Print the run summary, changes, datapoints, cumulative utilization and readiness."""
     window, report = result.window, result.utilization
     print_header("EC2 analysis", result.region, len(result.snapshots), state_summary(result.snapshots.values()))
     field("Window", f"{window.key} · {window.purpose} · {window.description}")
@@ -268,7 +276,8 @@ def print_analysis(result: AnalysisResult) -> None:
             print_change(change)
     console.print()
 
-    utilization.print_report(report)
+    utilization.print_report(report, statistics=False)
+    utilization.print_cumulative(result.cumulative)
 
     section(f"Evaluation readiness ({window.key} window)", indent=0)
     if not result.readiness:

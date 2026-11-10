@@ -4,8 +4,11 @@ Used by every analysis run and by the quick `metrics` command:
   1. load which hours are stored and which were already checked in CloudWatch
   2. request only the missing hours (nothing missing means no CloudWatch call at all)
   3. store the new datapoints and record the requested ranges as checked
-  4. report, per instance and metric: expected, available, already stored, fetched now,
-     no data in CloudWatch, plus average and peak hourly average
+  4. report, per instance and metric: expected, available, already stored, fetched now and
+     no data in CloudWatch, plus statistics (average, percentiles, trend, volatility, ...)
+
+Analysis runs also rebuild the cumulative summary of every series: statistics over every
+stored hour since the instance's current configuration took effect.
 """
 
 from __future__ import annotations
@@ -21,6 +24,8 @@ from app import db
 from app.auth import aws_auth
 from app.auth.common import console
 from app.cloud.aws.ec2 import store
+from app.cloud.aws.ec2.changes import InstanceSnapshot, configuration_version
+from app.cloud.aws.ec2.cumulative import CumulativeSummary, shape_line, stats_line, summarize
 from app.cloud.aws.ec2.metrics import (
     METRICS,
     PERIOD,
@@ -28,6 +33,7 @@ from app.cloud.aws.ec2.metrics import (
     Coverage,
     FetchRequest,
     FetchResult,
+    MetricDefinition,
     MetricSeries,
     SeriesKey,
     fetch,
@@ -79,6 +85,23 @@ class SeriesReport:
     def no_data(self) -> int:
         """Hours checked in CloudWatch for which it had no datapoint."""
         return max(self.expected - self.available - self.unchecked_hours, 0)
+
+    @property
+    def summary(self) -> CumulativeSummary:
+        """Statistics over the datapoints of this selection."""
+        return summarize(self.series.datapoints)
+
+
+@dataclass(frozen=True)
+class CumulativeResult:
+    """The cumulative summary of one series for the instance's current configuration."""
+
+    instance_id: str
+    name: str
+    metric: MetricDefinition
+    version: str
+    effective_since: datetime | None
+    summary: CumulativeSummary
 
 
 @dataclass(frozen=True)
@@ -209,6 +232,33 @@ def record_report(
         )
 
 
+def update_cumulative(
+    connection: Connection,
+    instance_scope: resources.Scope,
+    run_id: int,
+    updated_at: datetime,
+    targets: Mapping[str, store.MetricTarget],
+    snapshots: Mapping[str, InstanceSnapshot],
+) -> list[CumulativeResult]:
+    """Rebuild and store the cumulative summary of every series from the raw datapoints.
+
+    Evidence is every stored hour since the instance's current configuration took effect
+    (its last spec change), or every stored hour if no spec change was ever detected.
+    """
+    since = store.configuration_effective_since(connection, instance_scope, targets)
+    points = store.load_points_since(connection, instance_scope, since)
+    results = []
+    for instance_id in sorted(targets):
+        target, version = targets[instance_id], configuration_version(snapshots[instance_id])
+        for metric in METRICS:
+            summary = summarize(points.get((instance_id, metric.key), ()))
+            store.save_cumulative(
+                connection, target, instance_id, metric, version, since[instance_id], summary, run_id, updated_at
+            )
+            results.append(CumulativeResult(instance_id, target.name, metric, version, since[instance_id], summary))
+    return results
+
+
 def analyze(
     selection: Selection,
     region: str,
@@ -256,15 +306,18 @@ def _percent(part: int, whole: int) -> str:
     return f"{part / whole:.1%}" if whole else "—"
 
 
-def summary_line(item: SeriesReport) -> str:
-    """Return e.g. 'avg 12.4% · peak 45.1% · 223/223 hours · +2 new'."""
-    hours_text = f"{item.available}/{plural(item.expected, 'hour')}"
-    if item.available < item.expected:
-        hours_text += f" ({_percent(item.available, item.expected)})"
-    new = f" · +{item.fetched_now} new" if item.fetched_now else ""
-    if item.series.average is None:
-        return f"{item.series.metric.missing_hint} · {hours_text}"
-    return f"avg {item.series.average:.1f}% · peak {item.series.peak:.1f}% · {hours_text}{new}"
+def _print_statistics(label: str, summary: CumulativeSummary, missing_hint: str, extra: str = "") -> None:
+    """Print one metric's statistics on two aligned lines, or why there is no data."""
+    if summary.datapoint_count == 0:
+        field(label, f"{missing_hint}{extra}", "yellow", indent=4)
+        return
+    field(label, stats_line(summary), indent=4)
+    field("", f"{shape_line(summary)}{extra}", "dim", indent=4)
+
+
+def _instance_heading(name: str, instance_id: str, detail: str = "") -> None:
+    shown = escape(name) if name else "[dim](no name)[/]"
+    console.print(f"  [bold]{shown}[/] [dim]·[/] {instance_id}" + (f" [dim]· {escape(detail)}[/]" if detail else ""))
 
 
 def _cloudwatch_line(report: UtilizationReport) -> str:
@@ -276,8 +329,9 @@ def _cloudwatch_line(report: UtilizationReport) -> str:
     return f"{calls} · {report.queries} metric quer{'ies' if report.queries != 1 else 'y'}"
 
 
-def print_report(report: UtilizationReport, hourly: bool = False) -> None:
-    """Print datapoint availability, then each instance's CPU and memory, optionally every hour."""
+def print_report(report: UtilizationReport, hourly: bool = False, statistics: bool = True) -> None:
+    """Print datapoint availability, then each instance's CPU and memory statistics for the
+    report's hours (unless `statistics` is False), optionally every hourly value."""
     span = len(hours(report.start, report.end))
     section(f"Datapoints · {format_time(report.start)} → {format_time(report.end)} · {plural(span, 'hour')}", indent=0)
     if not report.series:
@@ -300,19 +354,45 @@ def print_report(report: UtilizationReport, hourly: bool = False) -> None:
     field("CloudWatch", _cloudwatch_line(report))
     console.print()
 
-    section("Utilization · hourly averages", indent=0)
     by_instance: dict[str, list[SeriesReport]] = {}
     for item in report.series:
         by_instance.setdefault(item.series.instance_id, []).append(item)
-    for instance_id, items in sorted(by_instance.items(), key=lambda pair: (pair[1][0].name.lower(), pair[0])):
-        name = escape(items[0].name) if items[0].name else "[dim](no name)[/]"
-        console.print(f"  [bold]{name}[/] [dim]·[/] {instance_id}")
-        for item in items:
-            field(item.series.metric.label, summary_line(item), "" if item.available else "yellow", indent=4)
-    console.print()
+
+    if statistics:
+        section(f"Utilization · {format_time(report.start)} → {format_time(report.end)}", indent=0)
+        for instance_id, items in sorted(by_instance.items(), key=lambda pair: (pair[1][0].name.lower(), pair[0])):
+            _instance_heading(items[0].name, instance_id)
+            for item in items:
+                new = f" · +{item.fetched_now} new" if item.fetched_now else ""
+                _print_statistics(item.series.metric.label, item.summary, item.series.metric.missing_hint, new)
+        console.print()
 
     if hourly:
         _print_hourly(by_instance)
+
+
+def print_cumulative(results: list[CumulativeResult]) -> None:
+    """Print the cumulative summary of every series for the current configuration."""
+    section("Cumulative utilization · current configuration", indent=0)
+    if not results:
+        console.print("  [dim]No instances to measure.[/]")
+        console.print()
+        return
+
+    by_instance: dict[str, list[CumulativeResult]] = {}
+    for result in results:
+        by_instance.setdefault(result.instance_id, []).append(result)
+    for instance_id, items in sorted(by_instance.items(), key=lambda pair: (pair[1][0].name.lower(), pair[0])):
+        first = items[0]
+        since = f"since {format_time(first.effective_since)}" if first.effective_since else "since tracking began"
+        _instance_heading(first.name, instance_id, f"config {first.version[:8]} · {since}")
+        for item in items:
+            missing = (
+                f"no datapoints yet for this configuration (took effect {format_time(item.effective_since)})"
+                if item.effective_since else item.metric.missing_hint
+            )
+            _print_statistics(item.metric.label, item.summary, missing)
+    console.print()
 
 
 def _print_hourly(by_instance: Mapping[str, list[SeriesReport]]) -> None:

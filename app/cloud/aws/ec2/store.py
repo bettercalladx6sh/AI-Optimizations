@@ -4,11 +4,12 @@ Each instance is stored as a generic resource (resources, resource_snapshots,
 resource_tags, resource_changes via app.db.resources) plus EC2-specific typed rows
 (ec2_instances, ec2_volumes) for querying its current configuration, and its hourly
 CPU and memory averages (ec2_metric_datapoints), the hour ranges already checked in
-CloudWatch (ec2_metric_fetches) and a per-run summary (ec2_metric_collections).
+CloudWatch (ec2_metric_fetches), a per-run summary (ec2_metric_collections) and the
+cumulative summary per configuration version (ec2_metric_cumulative).
 """
 
 from __future__ import annotations
-
+import json
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
@@ -17,7 +18,8 @@ from typing import Any
 
 from pymysql.connections import Connection
 
-from app.cloud.aws.ec2.changes import FieldChange, InstanceChange, InstanceSnapshot
+from app.cloud.aws.ec2.changes import SPEC_FIELDS, FieldChange, InstanceChange, InstanceSnapshot
+from app.cloud.aws.ec2.cumulative import CumulativeSummary
 from app.cloud.aws.ec2.configuration import InstanceConfiguration
 from app.cloud.aws.ec2.metrics import (
     METRICS,
@@ -345,3 +347,108 @@ def load_series(
         for instance_id in ids
         for metric in METRICS
     ]
+
+def configuration_effective_since(
+    connection: Connection,
+    instance_scope: resources.Scope,
+    instance_ids: Iterable[str],
+) -> dict[str, datetime | None]:
+    """When each instance's current configuration took effect: its last detected spec change.
+
+    None means no spec change was ever detected, so every stored hour belongs to it.
+    """
+    placeholders, ids = _instance_filter(instance_ids)
+    since: dict[str, datetime | None] = dict.fromkeys(ids)
+    if not ids:
+        return since
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT r.resource_id, c.detected_at, c.field_changes FROM resource_changes c "
+            "JOIN resources r ON r.id = c.resource_ref "
+            "WHERE r.account_ref = %s AND r.region = %s AND r.service = %s AND r.resource_type = %s "
+            f"AND r.resource_id IN ({placeholders}) AND c.change_type = 'modified' ORDER BY c.detected_at",
+            [instance_scope.account_ref, instance_scope.region, instance_scope.service,
+             instance_scope.resource_type, *ids],
+        )
+        for instance_id, detected_at, field_changes in cursor.fetchall():
+            if any(item["field"] in SPEC_FIELDS for item in json.loads(field_changes)):
+                since[instance_id] = from_db(detected_at)
+    return since
+
+
+def load_points_since(
+    connection: Connection,
+    instance_scope: resources.Scope,
+    since: dict[str, datetime | None],
+) -> dict[SeriesKey, list[Datapoint]]:
+    """Every stored hourly average of each instance from its `since` time (or all of them)."""
+    placeholders, ids = _instance_filter(since)
+    if not ids:
+        return {}
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT r.resource_id, d.metric, d.period_start, d.average "
+            "FROM ec2_metric_datapoints d JOIN resources r ON r.id = d.resource_ref "
+            "WHERE r.account_ref = %s AND r.region = %s AND r.service = %s AND r.resource_type = %s "
+            f"AND r.resource_id IN ({placeholders}) ORDER BY d.period_start",
+            [instance_scope.account_ref, instance_scope.region, instance_scope.service,
+             instance_scope.resource_type, *ids],
+        )
+        rows = cursor.fetchall()
+
+    points: dict[SeriesKey, list[Datapoint]] = defaultdict(list)
+    for instance_id, metric_key, period_start, average in rows:
+        moment = from_db(period_start)
+        start = since.get(instance_id)
+        if start is None or moment >= start:
+            points[(instance_id, metric_key)].append(Datapoint(moment, average))
+    return points
+
+
+def save_cumulative(
+    connection: Connection,
+    target: MetricTarget,
+    instance_id: str,
+    metric: MetricDefinition,
+    version: str,
+    effective_since: datetime | None,
+    summary: CumulativeSummary,
+    run_id: int,
+    updated_at: datetime,
+) -> None:
+    """Insert or rebuild the cumulative summary of one series for its configuration version."""
+    columns = {
+        "resource_ref": target.ref,
+        "instance_id": instance_id,
+        "instance_name": target.name or None,
+        "metric": metric.key,
+        "configuration_version": version,
+        "effective_since": to_db(effective_since),
+        "evidence_start": to_db(summary.evidence_start),
+        "evidence_end": to_db(summary.evidence_end),
+        "datapoint_count": summary.datapoint_count,
+        "value_sum": summary.value_sum,
+        "average": summary.average,
+        "minimum": summary.minimum,
+        "maximum": summary.maximum,
+        "p50": summary.p50,
+        "p95": summary.p95,
+        "p99": summary.p99,
+        "standard_deviation": summary.standard_deviation,
+        "trend": summary.trend,
+        "volatility": summary.volatility,
+        "coverage_percent": summary.coverage_percent,
+        "gap_count": summary.gap_count,
+        "run_id": run_id,
+        "updated_at": to_db(updated_at),
+    }
+    keys = ("resource_ref", "metric", "configuration_version")
+    names = ", ".join(columns)
+    placeholders = ", ".join(["%s"] * len(columns))
+    updates = ", ".join(f"{name} = new.{name}" for name in columns if name not in keys)
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"INSERT INTO ec2_metric_cumulative ({names}) VALUES ({placeholders}) AS new "
+            f"ON DUPLICATE KEY UPDATE {updates}",
+            tuple(columns.values()),
+        )

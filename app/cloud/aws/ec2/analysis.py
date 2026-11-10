@@ -9,9 +9,10 @@ A run has six steps, reported one by one through an optional `on_step` callback:
     5. CloudWatch metrics               only hours not stored or checked yet are requested
     6. store and cumulative summaries   everything stored, cumulative statistics rebuilt
 
-Windows: 30d = month to date, 90d = last 3 calendar months to date, testing windows rolling.
-An instance can only be evaluated once a full window (30 days for 30d, ...) has passed since it
-was launched or last changed; until then clients are told to wait.
+Windows come from app/config.py (calendar windows such as 30d = month to date, or rolling
+ones such as 7d). An instance can only be evaluated once its current configuration covers the
+whole window, i.e. the window holds no hour from before its launch or last significant change;
+until then clients are told exactly when to run again (see AnalysisWindow.ready_at).
 """
 
 from __future__ import annotations
@@ -38,7 +39,7 @@ from app.cloud.aws.ec2.configuration import InstanceConfiguration, build_configu
 from app.cloud.aws.ec2.instances import INSTANCE_STATES, describe_instances, state_summary
 from app.cloud.aws.ec2.metrics import FetchResult, fetch, hours, plan_requests
 from app.cloud.aws.ec2.windows import ANALYSIS_WINDOWS, DEFAULT_WINDOW, AnalysisWindow
-from app.cloud.display import field, format_time, plural, print_header, section
+from app.cloud.display import field, format_duration, format_time, plural, print_header, section
 from app.db import resources
 
 StepCallback = Callable[[str, str], None]
@@ -56,7 +57,7 @@ STEPS = (
 
 @dataclass(frozen=True)
 class Readiness:
-    """Whether an instance has been stable for a full window and can be evaluated."""
+    """Whether an instance's current configuration covers the whole window, so it can be evaluated."""
 
     snapshot: InstanceSnapshot
     reason: str
@@ -106,12 +107,12 @@ def _readiness(
     window: AnalysisWindow,
     now: datetime,
 ) -> Readiness:
-    """The evaluation window starts at the later of launch time and last change."""
+    """Ready once the window no longer contains hours from before the later of launch and last change."""
     events = [(moment, reason) for moment, reason in ((launched_at, "launched"), (changed_at, change_reason)) if moment]
     if not events:
         return Readiness(snapshot, "stable", None, None, now)
     since, reason = max(events)
-    return Readiness(snapshot, reason, since, since + window.duration, now)
+    return Readiness(snapshot, reason, since, window.ready_at(since), now)
 
 
 def _stored_change(entry: resources.StoredResource | None) -> tuple[datetime | None, str]:
@@ -286,15 +287,8 @@ def run_analysis(
 
 
 def remaining(delta: timedelta) -> str:
-    """Return e.g. '29 days 23 h', '5 h 10 min' or '12 min'."""
-    minutes = max(int(delta.total_seconds() // 60), 1)
-    days, minutes = divmod(minutes, 24 * 60)
-    hours_left, minutes = divmod(minutes, 60)
-    if days:
-        return f"{days} day{'s' if days != 1 else ''}" + (f" {hours_left} h" if hours_left else "")
-    if hours_left:
-        return f"{hours_left} h" + (f" {minutes} min" if minutes else "")
-    return f"{minutes} min"
+    """Return e.g. '20 days 15 h', '5 h 10 min' or '12 min' (at least one minute)."""
+    return format_duration(max(delta, timedelta(minutes=1)))
 
 
 def _print_readiness(item: Readiness) -> None:
@@ -313,7 +307,7 @@ def print_analysis(result: AnalysisResult) -> None:
     """Print the run summary, changes, datapoints, cumulative utilization and readiness."""
     window, report = result.window, result.utilization
     print_header("EC2 analysis", result.region, len(result.snapshots), state_summary(result.snapshots.values()))
-    field("Window", f"{window.key} · {window.purpose} · {window.description}")
+    field("Window", window.label(report.start, report.end))
     span = len(hours(report.start, report.end))
     field("Period", f"{format_time(report.start)} → {format_time(report.end)} ({plural(span, 'hour')})")
     field("Account", result.account_id)
@@ -355,7 +349,8 @@ def print_analysis(result: AnalysisResult) -> None:
         f"their {window.key} results are not reliable yet"
     )
     hint((
-        f"Wait {remaining(window.duration)} after the change before evaluating them (until {format_time(latest)})",
+        f"Wait until {format_time(latest)} ({remaining(latest - result.started_at)} from now), when the "
+        f"{window.description} window no longer holds hours from before the change",
         "Run the analysis again then; changed instances are re-checked on every run",
     ))
     console.print()

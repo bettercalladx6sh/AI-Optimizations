@@ -17,7 +17,7 @@ and window (evidence/aws/ec2/<account>/<region>/<window>.json), which every new 
 window replaces atomically, and only after the new evidence passed validation.
 
 Usage:
-    python -m app.cloud.aws.ec2.pipeline                  # 30d (month to date)
+    python -m app.cloud.aws.ec2.pipeline                  # default window from app/config.py
     python -m app.cloud.aws.ec2.pipeline 7d -o ev.json    # testing window, custom file
     python -m app.cloud.aws.ec2 evidence                  # same pipeline, shorthand
 """
@@ -151,7 +151,7 @@ def main(args: argparse.Namespace) -> int:
     """Run the pipeline with parsed arguments; exit code 0 on success, 1 on failure."""
     window = ANALYSIS_WINDOWS[args.window]
     console.print()
-    console.print(f"[bold]EC2 evidence pipeline[/] [dim]·[/] {window.key} · {window.purpose} · {window.description}")
+    console.print(f"[bold]EC2 evidence pipeline[/] [dim]·[/] {window.label(*window.bounds())}")
     console.print()
 
     steps = StepPrinter(STEPS)

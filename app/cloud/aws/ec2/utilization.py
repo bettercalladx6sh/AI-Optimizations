@@ -128,7 +128,7 @@ class UtilizationReport:
 
 def window_selection(window: AnalysisWindow, now: datetime | None = None) -> Selection:
     start, end = window.bounds(now)
-    return Selection(window.key, f"{window.key} · {window.purpose} · {window.description}", start, end)
+    return Selection(window.key, window.label(start, end), start, end)
 
 
 def day_selection(text: str, now: datetime | None = None) -> Selection:

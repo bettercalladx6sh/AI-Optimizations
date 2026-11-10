@@ -1,22 +1,25 @@
-"""Analysis windows: which hours an analysis covers.
+"""Analysis windows: which hours an analysis covers, built from app/config.py.
 
-Production windows follow the calendar:
-    30d  the current month to date, from the 1st at 00:00 UTC (even when fewer than 30 days
-         have passed, e.g. on 10 November it covers 1-10 November)
-    90d  the current month and the two before it, to date (e.g. 1 September - 10 November)
-Testing windows are rolling: 1h, 1d, 3d, 7d back from now.
+    rolling    the last N hours or days, back from the last settled hour
+    calendar   the current month and the (N - 1) months before it, from the 1st 00:00 UTC to
+               date; on 10 November a 1-month window covers 1-10 November (9 days, not 30)
 
-Every window ends at the last settled hour (see metrics.SETTLE_DELAY). The nominal duration
-(30 days, 90 days, ...) is also how long an instance must stay unchanged before it can be
-evaluated.
+Every window ends at the last settled hour (see metrics.settled_end). Labels, readiness and
+evidence always use the real span of the window at run time, never a nominal number of days.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from app.cloud.aws.ec2.metrics import settled_end
+from app import config
+from app.cloud.aws.ec2.metrics import PERIOD, SETTLE_DELAY, floor_hour, settled_end
+from app.cloud.display import format_duration
+
+PURPOSES = ("production", "testing")
+KEY_PATTERN = re.compile(r"^[a-z0-9]{1,16}$")
 
 
 @dataclass(frozen=True)
@@ -24,12 +27,12 @@ class AnalysisWindow:
     """How far back an analysis looks, and whether it is a production or testing run."""
 
     key: str
-    duration: timedelta
     purpose: str
-    calendar_months: int = 0
+    duration: timedelta | None = None      # rolling windows
+    calendar_months: int = 0               # calendar windows
 
     def bounds(self, now: datetime | None = None) -> tuple[datetime, datetime]:
-        """Return (start, end): from the 1st of the month for calendar windows, else rolling."""
+        """(start, end): from the 1st of the month for calendar windows, else rolling."""
         end = settled_end(now)
         if self.calendar_months:
             return month_start(end, self.calendar_months - 1), end
@@ -37,29 +40,71 @@ class AnalysisWindow:
 
     @property
     def description(self) -> str:
+        """e.g. 'month to date', 'last 3 calendar months to date', 'rolling 7 days'."""
         if self.calendar_months == 1:
             return "month to date"
         if self.calendar_months:
             return f"last {self.calendar_months} calendar months to date"
-        return f"rolling {self.key}"
+        return f"rolling {format_duration(self.duration)}"
+
+    def label(self, start: datetime, end: datetime) -> str:
+        """e.g. '30d · production · month to date · 9 days 8 h (224 hours)' or '7d · testing · rolling 7 days (168 hours)'."""
+        return span_label(self.key, self.purpose, self.description, int((end - start) / PERIOD))
+
+    def ready_at(self, since: datetime) -> datetime:
+        """First moment the window no longer contains any hour from before `since`."""
+        if self.calendar_months:
+            first = month_start(since)
+            if first < since:
+                first = month_start(first, -1)                  # next month's 1st
+            covered_from = month_start(first, -(self.calendar_months - 1))
+        else:
+            covered_from = _ceil_hour(since + self.duration)
+        return covered_from + SETTLE_DELAY
+
+
+def span_label(key: str, purpose: str, description: str, hours: int) -> str:
+    """Window label with its real span; calendar windows also show the span in days."""
+    count = f"{hours} hour{'s' if hours != 1 else ''}"
+    if description.startswith("rolling"):
+        return f"{key} · {purpose} · {description} ({count})"
+    return f"{key} · {purpose} · {description} · {format_duration(timedelta(hours=hours))} ({count})"
 
 
 def month_start(moment: datetime, months_back: int = 0) -> datetime:
-    """00:00 UTC on the 1st of the month `months_back` months before `moment`'s month."""
+    """00:00 UTC on the 1st of the month `months_back` months before `moment`'s month (negative = after)."""
     index = moment.year * 12 + (moment.month - 1) - months_back
     return datetime(index // 12, index % 12 + 1, 1, tzinfo=timezone.utc)
 
 
-# Production uses calendar windows (30d, 90d); testing uses rolling ones.
-ANALYSIS_WINDOWS = {
-    window.key: window
-    for window in (
-        AnalysisWindow("1h", timedelta(hours=1), "testing"),
-        AnalysisWindow("1d", timedelta(days=1), "testing"),
-        AnalysisWindow("3d", timedelta(days=3), "testing"),
-        AnalysisWindow("7d", timedelta(days=7), "testing"),
-        AnalysisWindow("30d", timedelta(days=30), "production", calendar_months=1),
-        AnalysisWindow("90d", timedelta(days=90), "production", calendar_months=3),
-    )
+def _ceil_hour(moment: datetime) -> datetime:
+    floored = floor_hour(moment)
+    return floored if floored == moment else floored + PERIOD
+
+
+def _build(key: str, settings: dict[str, object]) -> AnalysisWindow:
+    """Validate one entry of config.ANALYSIS_WINDOWS and turn it into an AnalysisWindow."""
+    where = f"app/config.py ANALYSIS_WINDOWS['{key}']"
+    if not KEY_PATTERN.match(key):
+        raise ValueError(f"{where}: key must be 1-16 lowercase letters or digits")
+    purpose = settings.get("purpose")
+    if purpose not in PURPOSES:
+        raise ValueError(f"{where}: purpose must be one of {PURPOSES}")
+    units = {name: settings[name] for name in ("hours", "days", "months") if name in settings}
+    unknown = set(settings) - {"purpose", "hours", "days", "months"}
+    if unknown or len(units) != 1:
+        raise ValueError(f"{where}: give exactly one of hours, days or months (and purpose)")
+    (unit, amount), = units.items()
+    if not isinstance(amount, int) or isinstance(amount, bool) or amount < 1:
+        raise ValueError(f"{where}: {unit} must be a whole number of 1 or more")
+    if unit == "months":
+        return AnalysisWindow(key, purpose, calendar_months=amount)
+    return AnalysisWindow(key, purpose, duration=timedelta(**{unit: amount}))
+
+
+ANALYSIS_WINDOWS: dict[str, AnalysisWindow] = {
+    key: _build(key, settings) for key, settings in config.ANALYSIS_WINDOWS.items()
 }
-DEFAULT_WINDOW = "30d"
+if config.DEFAULT_WINDOW not in ANALYSIS_WINDOWS:
+    raise ValueError(f"app/config.py DEFAULT_WINDOW '{config.DEFAULT_WINDOW}' is not in ANALYSIS_WINDOWS")
+DEFAULT_WINDOW = config.DEFAULT_WINDOW

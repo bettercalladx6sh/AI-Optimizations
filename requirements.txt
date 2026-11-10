@@ -30,3 +30,6 @@ urllib3>=2.0.0,<3.0.0
 
 # JSON Schema validation of evidence documents (draft 2020-12)
 jsonschema>=4.23.0,<5.0.0
+
+# OpenAI SDK for AI rightsizing reasoning (Responses API, structured outputs)
+openai>=1.40.0,<2.0.0

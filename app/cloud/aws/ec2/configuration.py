@@ -179,7 +179,6 @@ def _to_configuration(
         tags=tuple(sorted((tag["Key"], tag["Value"]) for tag in raw.get("Tags", []))),
     )
 
-
 def get_configurations(
     region: str | None = None,
     resource: str | None = None,
@@ -202,7 +201,11 @@ def get_configurations(
     raws = describe_instances(region, states, instance_ids, filters)
     if resource and not raws:
         raise AwsApiError(f"no instance found matching '{resource}'", NOT_FOUND_HINTS)
+    return build_configurations(raws, region)
 
+
+def build_configurations(raws: list[dict[str, Any]], region: str | None = None) -> list[InstanceConfiguration]:
+    """Turn describe_instances records into full configurations (instance types and volumes added)."""
     client = aws_auth.get_client("ec2", region=region)
     type_specs = _type_specs(client, {raw["InstanceType"] for raw in raws})
     volume_details = _volume_details(client, {

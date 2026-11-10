@@ -1,0 +1,308 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cost-optimizer.local/schemas/aws/ec2/evidence/1.0",
+  "title": "EC2 rightsizing evidence",
+  "description": "Evidence for one AWS account and region built from one analysis run: per-instance configuration, changes, evaluation readiness, hourly CPU/memory statistics and data-quality issues. Input for AI rightsizing evaluation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "evidence_id", "generated_at", "source", "analysis_window",
+    "metric_definitions", "collection", "summary", "instances"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "evidence_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "generated_at": { "$ref": "#/$defs/timestamp" },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "service", "account_id", "region", "analysis_run_id"],
+      "properties": {
+        "provider": { "const": "aws" },
+        "service": { "const": "ec2" },
+        "account_id": { "type": "string", "pattern": "^[0-9]{12}$" },
+        "region": { "type": "string", "pattern": "^[a-z]{2}(-[a-z]+)+-[0-9]+$" },
+        "analysis_run_id": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "analysis_window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "purpose", "description", "start", "end", "hours", "required_stable_days"],
+      "properties": {
+        "key": { "enum": ["1h", "1d", "3d", "7d", "30d", "90d"] },
+        "purpose": { "enum": ["production", "testing"] },
+        "description": { "type": "string", "minLength": 1 },
+        "start": { "$ref": "#/$defs/timestamp" },
+        "end": { "$ref": "#/$defs/timestamp" },
+        "hours": { "type": "integer", "minimum": 0 },
+        "required_stable_days": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "metric_definitions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key", "label", "namespace", "metric_name", "statistic", "period_seconds", "unit"],
+        "properties": {
+          "key": { "$ref": "#/$defs/metricKey" },
+          "label": { "type": "string", "minLength": 1 },
+          "namespace": { "type": "string", "minLength": 1 },
+          "metric_name": { "type": "string", "minLength": 1 },
+          "statistic": { "const": "Average" },
+          "period_seconds": { "const": 3600 },
+          "unit": { "const": "Percent" }
+        }
+      }
+    },
+    "collection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cloudwatch_api_calls", "cloudwatch_metric_queries", "datapoints_expected",
+        "datapoints_available", "datapoints_fetched_now", "hours_without_data"
+      ],
+      "properties": {
+        "cloudwatch_api_calls": { "$ref": "#/$defs/count" },
+        "cloudwatch_metric_queries": { "$ref": "#/$defs/count" },
+        "datapoints_expected": { "$ref": "#/$defs/count" },
+        "datapoints_available": { "$ref": "#/$defs/count" },
+        "datapoints_fetched_now": { "$ref": "#/$defs/count" },
+        "hours_without_data": { "$ref": "#/$defs/count" }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "instance_count", "instances_by_state", "ready_for_evaluation", "waiting_for_evaluation",
+        "configuration_changes", "instances_with_issues"
+      ],
+      "properties": {
+        "instance_count": { "$ref": "#/$defs/count" },
+        "instances_by_state": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/state" },
+          "additionalProperties": { "$ref": "#/$defs/count" }
+        },
+        "ready_for_evaluation": { "$ref": "#/$defs/count" },
+        "waiting_for_evaluation": { "$ref": "#/$defs/count" },
+        "configuration_changes": { "$ref": "#/$defs/count" },
+        "instances_with_issues": { "$ref": "#/$defs/count" }
+      }
+    },
+    "instances": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/instance" }
+    }
+  },
+  "$defs": {
+    "timestamp": {
+      "description": "UTC timestamp, e.g. 2026-11-10T07:00:00Z",
+      "type": "string",
+      "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$"
+    },
+    "nullableTimestamp": {
+      "oneOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }]
+    },
+    "count": { "type": "integer", "minimum": 0 },
+    "percent": { "type": "number", "minimum": 0, "maximum": 100 },
+    "nullablePercent": {
+      "oneOf": [{ "$ref": "#/$defs/percent" }, { "type": "null" }]
+    },
+    "metricKey": { "enum": ["cpu_utilization", "memory_utilization"] },
+    "state": { "enum": ["pending", "running", "shutting-down", "stopping", "stopped"] },
+    "instance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instance_id", "name", "state", "configuration", "changes", "evaluation", "metrics", "data_quality"],
+      "properties": {
+        "instance_id": { "type": "string", "pattern": "^i-[0-9a-f]{8,17}$" },
+        "name": { "type": ["string", "null"] },
+        "state": { "$ref": "#/$defs/state" },
+        "configuration": { "$ref": "#/$defs/configuration" },
+        "changes": { "type": "array", "items": { "$ref": "#/$defs/change" } },
+        "evaluation": { "$ref": "#/$defs/evaluation" },
+        "metrics": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/metricKey" },
+          "additionalProperties": { "$ref": "#/$defs/metric" },
+          "minProperties": 1
+        },
+        "data_quality": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["issues"],
+          "properties": {
+            "issues": { "type": "array", "items": { "$ref": "#/$defs/issue" } }
+          }
+        }
+      }
+    },
+    "configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version", "effective_since", "instance_type", "family", "size", "vcpus", "memory_gib",
+        "network_performance", "burstable", "current_generation", "architecture", "platform",
+        "lifecycle", "tenancy", "availability_zone", "ebs_optimized", "detailed_monitoring",
+        "launch_time", "storage", "tags"
+      ],
+      "properties": {
+        "version": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "effective_since": { "$ref": "#/$defs/nullableTimestamp" },
+        "instance_type": { "type": "string", "pattern": "^[a-z0-9-]+\\.[a-z0-9-]+$" },
+        "family": { "type": "string", "minLength": 1 },
+        "size": { "type": "string", "minLength": 1 },
+        "vcpus": { "type": ["integer", "null"], "minimum": 1 },
+        "memory_gib": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+        "network_performance": { "type": ["string", "null"] },
+        "burstable": { "type": ["boolean", "null"] },
+        "current_generation": { "type": ["boolean", "null"] },
+        "architecture": { "type": ["string", "null"] },
+        "platform": { "type": ["string", "null"] },
+        "lifecycle": { "enum": ["on-demand", "spot", "scheduled", "capacity-block", null] },
+        "tenancy": { "type": ["string", "null"] },
+        "availability_zone": { "type": ["string", "null"] },
+        "ebs_optimized": { "type": "boolean" },
+        "detailed_monitoring": { "type": "boolean" },
+        "launch_time": { "$ref": "#/$defs/nullableTimestamp" },
+        "storage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["total_gib", "volumes"],
+          "properties": {
+            "total_gib": { "$ref": "#/$defs/count" },
+            "volumes": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "volume_id", "device", "size_gib", "volume_type", "iops",
+                  "throughput_mibps", "encrypted", "delete_on_termination"
+                ],
+                "properties": {
+                  "volume_id": { "type": "string", "pattern": "^vol-[0-9a-f]+$" },
+                  "device": { "type": "string", "minLength": 1 },
+                  "size_gib": { "type": ["integer", "null"], "minimum": 1 },
+                  "volume_type": { "type": ["string", "null"] },
+                  "iops": { "type": ["integer", "null"], "minimum": 0 },
+                  "throughput_mibps": { "type": ["integer", "null"], "minimum": 0 },
+                  "encrypted": { "type": ["boolean", "null"] },
+                  "delete_on_termination": { "type": "boolean" }
+                }
+              }
+            }
+          }
+        },
+        "tags": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "change": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "significant", "fields"],
+      "properties": {
+        "kind": { "enum": ["added", "modified"] },
+        "significant": { "type": "boolean" },
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["field", "before", "after"],
+            "properties": {
+              "field": { "type": "string", "minLength": 1 },
+              "before": { "type": ["string", "number", "boolean", "array", "null"] },
+              "after": { "type": ["string", "number", "boolean", "array", "null"] }
+            }
+          }
+        }
+      }
+    },
+    "evaluation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ready", "reason", "since", "ready_at", "remaining_hours"],
+      "properties": {
+        "ready": { "type": "boolean" },
+        "reason": { "enum": ["stable", "launched", "changed", "added", "not_measured"] },
+        "since": { "$ref": "#/$defs/nullableTimestamp" },
+        "ready_at": { "$ref": "#/$defs/nullableTimestamp" },
+        "remaining_hours": { "type": ["number", "null"], "minimum": 0 }
+      }
+    },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["data_status", "window", "cumulative"],
+      "properties": {
+        "data_status": { "enum": ["available", "no_data"] },
+        "window": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["expected_hours", "available_hours", "coverage_percent"],
+          "properties": {
+            "expected_hours": { "$ref": "#/$defs/count" },
+            "available_hours": { "$ref": "#/$defs/count" },
+            "coverage_percent": { "$ref": "#/$defs/percent" }
+          }
+        },
+        "cumulative": {
+          "oneOf": [{ "$ref": "#/$defs/cumulative" }, { "type": "null" }]
+        }
+      }
+    },
+    "cumulative": {
+      "description": "Statistics over every stored hourly average since the current configuration took effect.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "datapoint_count", "evidence_start", "evidence_end", "value_sum", "average", "minimum",
+        "maximum", "p50", "p95", "p99", "standard_deviation", "trend", "volatility",
+        "coverage_percent", "gap_count"
+      ],
+      "properties": {
+        "datapoint_count": { "$ref": "#/$defs/count" },
+        "evidence_start": { "$ref": "#/$defs/nullableTimestamp" },
+        "evidence_end": { "$ref": "#/$defs/nullableTimestamp" },
+        "value_sum": { "type": "number", "minimum": 0 },
+        "average": { "$ref": "#/$defs/nullablePercent" },
+        "minimum": { "$ref": "#/$defs/nullablePercent" },
+        "maximum": { "$ref": "#/$defs/nullablePercent" },
+        "p50": { "$ref": "#/$defs/nullablePercent" },
+        "p95": { "$ref": "#/$defs/nullablePercent" },
+        "p99": { "$ref": "#/$defs/nullablePercent" },
+        "standard_deviation": { "type": ["number", "null"], "minimum": 0 },
+        "trend": { "enum": ["GROWING", "STABLE", "DECLINING", null] },
+        "volatility": { "enum": ["LOW", "MODERATE", "HIGH", "STABLE", null] },
+        "coverage_percent": { "$ref": "#/$defs/percent" },
+        "gap_count": { "$ref": "#/$defs/count" }
+      }
+    },
+    "issue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "metric", "message"],
+      "properties": {
+        "code": {
+          "enum": [
+            "METRIC_MISSING", "LOW_COVERAGE", "LIMITED_HISTORY",
+            "RECENTLY_CHANGED", "RECENTLY_LAUNCHED", "INSTANCE_STOPPED"
+          ]
+        },
+        "metric": { "oneOf": [{ "$ref": "#/$defs/metricKey" }, { "type": "null" }] },
+        "message": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

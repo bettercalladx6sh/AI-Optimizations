@@ -1,0 +1,1 @@
+"""OpenSearch searches for Azure resources."""

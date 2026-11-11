@@ -15,7 +15,7 @@ files in `evidence/`, `recommendations/` and `opensearch_results/`.
 | 1 | [Setup](#1-setup) | venv, packages, `.env`, docker |
 | 2 | [Connection checks](#2-connection-checks) | `app.auth` |
 | 3 | [Local analysis database](#3-local-analysis-database) | `docker compose`, `app.db` |
-| 4 | [AI analysis (recommended entry point)](#4-ai-analysis-recommended-entry-point) | `app.reasoning` |
+| 4 | [AI analysis (recommended entry point)](#4-ai-analysis-recommended-entry-point) | `app.reasoning`, [`app.analyze`](#ai-and-opensearch-in-one-command) |
 | 5 | [AWS EC2](#5-aws-ec2) | `app.cloud.aws.ec2`, `app.cloud.aws.ec2.pricing` |
 | 6 | [Azure VMs](#6-azure-vms) | `app.cloud.azure.vm`, `app.cloud.azure.vm.pricing` |
 | 7 | [Company database queries](#7-company-database-queries) | `app.server.mysql.*` |
@@ -33,6 +33,7 @@ docker compose up -d
 python -m app.auth
 python -m app.reasoning 7d                  # AWS EC2: evidence + AI recommendations
 python -m app.reasoning --cloud azure 7d    # Azure VMs: evidence + AI recommendations
+python -m app.analyze --analyze azure       # Azure VMs: AI recommendations + OpenSearch, both JSON reports
 ```
 
 Every command accepts `-h` / `--help` for its full option list.
@@ -117,6 +118,42 @@ python -m app.reasoning 7d -o rec.json -p            # custom output file, also 
 | `--no-ai` | Rule-based decisions only |
 | `-o, --output FILE` | Recommendations file to create or update |
 | `-p, --print` | Also print the recommendations JSON |
+
+### AI and OpenSearch in one command
+
+`app.analyze` runs the AI analysis above and then the [OpenSearch super index](#8-opensearch-super-index)
+query of the same cloud, in order, and each part writes its usual JSON report. A part that
+fails does not stop the other one; the exit code is `1` when any part failed.
+
+```bash
+python -m app.analyze --analyze azure                    # Azure: AI recommendations, then OpenSearch
+python -m app.analyze --analyze azure 7d --location eastus
+python -m app.analyze --analyze azure --no-ai            # rules only, no OpenAI call
+python -m app.analyze --analyze azure --only opensearch  # one part only: ai or opensearch
+python -m app.analyze --analyze azure --year 2025 --show 0 -q
+python -m app.analyze --analyze aws --region us-east-1   # the same for AWS EC2
+```
+
+| Part | Runs | JSON report (`azure` / `aws`) |
+|---|---|---|
+| 1/2 AI rightsizing | `python -m app.reasoning --cloud <cloud>` | `recommendations/azure/vm/<subscription>/<location\|all>/<window>.json` / `recommendations/aws/ec2/<account>/<region>/<window>.json` |
+| 2/2 OpenSearch | `app.server.opensearch.azure.vm_super_index` / `…aws.ec2.ec2_super_index` | `opensearch_results/azure_opensearch.json` / `opensearch_results/aws_ec2_opensearch.json` |
+
+| Option | Meaning |
+|---|---|
+| `--analyze aws\|azure` | Cloud to analyse (required) |
+| `WINDOW` | AI analysis window (default `30d`) |
+| `--location LOCATION` | Azure location for the AI part (default: every location) |
+| `--region REGION` | AWS region for the AI part (default `AWS_DEFAULT_REGION`) |
+| `--no-ai` | Rule-based decisions only |
+| `--only ai\|opensearch` | Run one part only (default: both) |
+| `--year YEAR` | OpenSearch: year of `audit_date` and `timestamp` (default 2026) |
+| `--show COUNT` | OpenSearch: documents listed per job, `0` for all (default 5) |
+| `-q, --quiet` | OpenSearch: no progress lines |
+
+The Azure OpenSearch hits are saved to `opensearch_results/azure_opensearch.json` in the
+project root, the same file as running the super index command on its own (replaced in place
+on every run). To save them elsewhere, run the super index command directly with `-o`.
 
 ---
 
@@ -326,10 +363,10 @@ All output folders are git-ignored. Each file is replaced in place on the next r
 |---|---|
 | `evidence/aws/ec2/<account>/<region>/<window>.json` | `app.cloud.aws.ec2 evidence`, `app.reasoning` |
 | `evidence/azure/vm/<subscription>/<location\|all>/<window>.json` | `app.cloud.azure.vm evidence`, `app.reasoning --cloud azure` |
-| `recommendations/aws/ec2/<account>/<region>/<window>.json` | `app.reasoning` |
-| `recommendations/azure/vm/<subscription>/<location\|all>/<window>.json` | `app.reasoning --cloud azure` |
-| `opensearch_results/aws_ec2_opensearch.json` | `app.server.opensearch.aws.ec2.ec2_super_index` |
-| `opensearch_results/azure_opensearch.json` | `app.server.opensearch.azure.vm_super_index` |
+| `recommendations/aws/ec2/<account>/<region>/<window>.json` | `app.reasoning`, `app.analyze --analyze aws` |
+| `recommendations/azure/vm/<subscription>/<location\|all>/<window>.json` | `app.reasoning --cloud azure`, `app.analyze --analyze azure` |
+| `opensearch_results/aws_ec2_opensearch.json` | `app.server.opensearch.aws.ec2.ec2_super_index`, `app.analyze --analyze aws` |
+| `opensearch_results/azure_opensearch.json` | `app.server.opensearch.azure.vm_super_index`, `app.analyze --analyze azure` |
 
 ---
 

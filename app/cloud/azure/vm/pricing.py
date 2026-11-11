@@ -6,11 +6,15 @@ and savings plans are not considered. Results are cached for the run, and reques
 the shared backoff, so throttling (429) slows the run down instead of failing it.
 
 Only prices Azure returns are used: a size with no single, unambiguous price gets no price,
-and nothing is estimated. VMs whose bill depends on more than the size get a reason instead
-of a price: Spot VMs, VMs on dedicated hosts, marketplace plans and images that carry a
-pay-as-you-go software licence (RHEL, SUSE, SQL Server, Ubuntu Pro). A Windows VM with Azure
-Hybrid Benefit pays the Linux (compute only) rate, and a RHEL/SUSE VM with its own subscription
-(BYOS) the Linux rate.
+and nothing is estimated. Azure flags one region of a shared meter as primary
+(isPrimaryMeterRegion); the primary meter is preferred, but when a size has no primary meter
+in the location (e.g. the DSv3 series, whose only pay-as-you-go meter is not primary) its
+non-primary meter is used, so such sizes are still priced.
+
+VMs whose bill depends on more than the size get a reason instead of a price: Spot VMs, VMs
+on dedicated hosts, marketplace plans and images that carry a pay-as-you-go software licence
+(RHEL, SUSE, SQL Server, Ubuntu Pro). A Windows VM with Azure Hybrid Benefit pays the Linux
+(compute only) rate, and a RHEL/SUSE VM with its own subscription (BYOS) the Linux rate.
 
 Usage:
     python -m app.cloud.azure.vm.pricing Standard_D2s_v5 Standard_D4s_v5 --location eastus
@@ -89,13 +93,12 @@ def _filter(location: str, sizes: tuple[str, ...]) -> str:
 
 
 def _matches(item: dict[str, Any], operating_system: str) -> bool:
-    """A pay-as-you-go hourly meter for the operating system (no Spot / Low Priority)."""
+    """A pay-as-you-go hourly meter for the operating system (no Spot / Low Priority), primary or not."""
     meter = f"{item.get('skuName', '')} {item.get('meterName', '')}".lower()
     windows = item.get("productName", "").endswith(" Windows")
     return (
         item.get("type") == "Consumption"
         and item.get("unitOfMeasure") == "1 Hour"
-        and item.get("isPrimaryMeterRegion", True)
         and not any(excluded in meter for excluded in EXCLUDED_METERS)
         and windows == (operating_system == WINDOWS)
         and float(item.get("retailPrice") or 0) > 0
@@ -109,7 +112,7 @@ def fetch_prices(location: str, sizes: tuple[str, ...], operating_system: str = 
     `operating_system` is the meter: Linux or Windows.
     """
     location = location.lower()
-    found: dict[str, list[InstancePrice]] = {}
+    found: dict[str, list[tuple[bool, InstancePrice]]] = {}
     wanted = {size.lower(): size for size in sizes}
     ordered = tuple(sorted(wanted.values()))
     for index in range(0, len(ordered), BATCH):
@@ -120,7 +123,8 @@ def fetch_prices(location: str, sizes: tuple[str, ...], operating_system: str = 
                 size = wanted.get(item.get("armSkuName", "").lower())
                 if size is None or not _matches(item, operating_system) or item.get("currencyCode", "USD") != "USD":
                     continue
-                found.setdefault(size, []).append(InstancePrice(
+                primary = bool(item.get("isPrimaryMeterRegion", True))
+                found.setdefault(size, []).append((primary, InstancePrice(
                     instance_type=size,
                     region=location,
                     operating_system=operating_system,
@@ -128,14 +132,20 @@ def fetch_prices(location: str, sizes: tuple[str, ...], operating_system: str = 
                     hourly_usd=float(item["retailPrice"]),
                     effective_date=item.get("effectiveStartDate"),
                     published_at=None,
-                ))
+                )))
             next_link = page.get("NextPageLink")
             if not next_link:
                 break
             page = rest.public_get(next_link, "Azure Retail Prices API")
 
-    # Keep a size only when Azure returned one unambiguous price for it.
-    return {size: prices[0] for size, prices in found.items() if len({price.hourly_usd for price in prices}) == 1}
+    # Prefer the primary meter; fall back to non-primary meters only when a size has no primary
+    # one. Keep a size only when the chosen meters give one unambiguous price.
+    prices: dict[str, InstancePrice] = {}
+    for size, meters in found.items():
+        chosen = [price for primary, price in meters if primary] or [price for _, price in meters]
+        if len({price.hourly_usd for price in chosen}) == 1:
+            prices[size] = chosen[0]
+    return prices
 
 
 def main(argv: list[str] | None = None) -> int:

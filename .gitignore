@@ -181,3 +181,7 @@ evidence/
 
 # Generated rightsizing recommendations (may contain account details)
 recommendations/
+
+
+# Saved OpenSearch results (company data)
+opensearch_results/

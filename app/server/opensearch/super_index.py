@@ -17,6 +17,12 @@ fetched of the total OpenSearch reports, elapsed time), so a slow read is visibl
 and a stuck one shows a clock that keeps running on the same count. stdout stays clean for
 --json; -q turns the progress off.
 
+A command can also save the result as a JSON file (run_cli(..., output=...), e.g. the Azure
+VM command writes opensearch_results/azure_opensearch.json): an array of the matched hits
+exactly as OpenSearch returned them (_index, _id, _score, _source), in the same order as the
+output (newest completed job first, then newest timestamp). Every run replaces that same file
+in place (atomically, via app/cloud/files.write_json); it never creates numbered copies.
+
 Only documents whose timestamp falls in the year are kept: OpenSearch filters on the range,
 and each returned document is checked again (its timestamp must start with "2026-"), so a
 document from another year never reaches the output even if the field is not mapped as a date.
@@ -37,6 +43,7 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
+from pathlib import Path
 from typing import Any
 
 from opensearchpy.exceptions import NotFoundError, TransportError
@@ -47,6 +54,7 @@ from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn
 from app.auth import opensearch_auth
 from app.auth.common import AuthError, console, hint, status
 from app.cloud.display import NOT_SET, plural
+from app.cloud.files import PROJECT_ROOT, display_path, write_json
 from app.server.mysql.active_tenants import Tenant
 from app.server.mysql.completed_audits_latest import newest_first
 from app.server.mysql.data_ingestion_audit import DEFAULT_STATUS, DEFAULT_YEAR, Audit, AuditResult, fetch_audits
@@ -59,8 +67,11 @@ SEARCH_TIMEOUT = 60
 TIMESTAMP_FIELD = "timestamp"
 SCROLL_PARAMS = {"scroll": SCROLL_KEEP_ALIVE, "request_timeout": SEARCH_TIMEOUT}
 DEFAULT_SHOWN = 5
+RESULTS_DIR = PROJECT_ROOT / "opensearch_results"
 
 Document = dict[str, Any]
+Hit = dict[str, Any]                                  # one search hit: _index, _id, _score, _source
+stderr = Console(stderr=True)                         # progress and file notes; stdout stays for --json
 PageCallback = Callable[[int, "int | None"], None]   # (documents fetched so far, total or None)
 
 
@@ -97,7 +108,7 @@ def search_all(index: str, query: dict[str, Any], on_page: PageCallback | None =
     """Every hit of the query in the index (all pages), or None when the index does not exist.
     on_page(fetched, total) is called after every page, for progress."""
     client = opensearch_auth.get_client()
-    body = {**query, "size": PAGE_SIZE, "sort": ["_doc"], "track_total_hits": True}
+    body = {**query, "size": PAGE_SIZE, "track_total_hits": True}
     try:
         page = client.search(index=index, body=body, params=SCROLL_PARAMS)
     except NotFoundError:
@@ -140,7 +151,7 @@ class FetchProgress:
             MofNCompleteColumn(),
             TextColumn("[dim]{task.fields[unit]}[/]"),
             TimeElapsedColumn(),
-            console=Console(stderr=True),
+            console=stderr,
         ) if enabled else None
 
     def __enter__(self) -> FetchProgress:
@@ -168,14 +179,16 @@ class FetchProgress:
                                   description=f"{description} [dim]· {escape(note)}[/]" if note else description)
 
 
-def _document(hit: dict[str, Any]) -> Document:
+def _document(hit: Hit) -> Document:
     """A hit as one flat object: its _id as doc_id, then every _source field unchanged."""
     return {"doc_id": hit.get("_id"), **hit.get("_source", {})}
 
 
-def _newest_document_first(documents: list[Document]) -> list[Document]:
-    return sorted(documents, key=lambda doc: (str(doc.get("timestamp") or ""), str(doc.get("resource_id") or "")),
-                  reverse=True)
+def _newest_hit_first(hits: list[Hit]) -> list[Hit]:
+    def key(hit: Hit) -> tuple[str, str]:
+        source = hit.get("_source", {})
+        return str(source.get(TIMESTAMP_FIELD) or ""), str(source.get("resource_id") or "")
+    return sorted(hits, key=key, reverse=True)
 
 
 def _iso(value: date | datetime | None) -> str | None:
@@ -190,7 +203,11 @@ class JobDocuments:
     tenant: Tenant
     audit: Audit
     index: str
-    documents: list[Document]
+    hits: list[Hit]                          # as OpenSearch returned them, newest timestamp first
+
+    @property
+    def documents(self) -> list[Document]:
+        return [_document(hit) for hit in self.hits]
 
     def to_dict(self) -> dict[str, Any]:
         audit = self.audit
@@ -223,7 +240,11 @@ class SuperIndexResult:
 
     @property
     def matched(self) -> int:
-        return sum(len(job.documents) for job in self.jobs)
+        return sum(len(job.hits) for job in self.jobs)
+
+    def ordered_hits(self) -> list[Hit]:
+        """Every matched hit as OpenSearch returned it, newest completed job first."""
+        return [hit for job in self.jobs for hit in job.hits]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -266,7 +287,7 @@ def fetch_super_index(
             by_job.setdefault((audit.tenant_id, audit.job_id), audit)  # newest audit wins a repeated job
 
     query = filter_query(terms, year)
-    grouped: dict[tuple[str, str], list[Document]] = {}
+    grouped: dict[tuple[str, str], list[Hit]] = {}
     unmatched: dict[str, Counter[str]] = {}
     missing: list[str] = []
     total = outside_year = 0
@@ -280,24 +301,24 @@ def fetch_super_index(
             continue
         progress.finish(step, len(hits))
         for hit in hits:
-            document = _document(hit)
-            if not _in_year(document, year):
+            source = hit.get("_source", {})
+            if not _in_year(source, year):
                 outside_year += 1
                 continue
             total += 1
-            key = (tenant.tenant_id, str(document.get("job_id") or ""))
+            key = (tenant.tenant_id, str(source.get("job_id") or ""))
             if key in by_job:
-                grouped.setdefault(key, []).append(document)
+                grouped.setdefault(key, []).append(hit)
             else:
                 unmatched.setdefault(tenant.tenant_id, Counter())[key[1] or NOT_SET] += 1
 
     tenants = {tenant.tenant_id: tenant for tenant in audits.tenants}
     jobs: list[JobDocuments] = []
     for key, audit in by_job.items():  # insertion order = newest first
-        documents = grouped.get(key)
-        if documents:
+        hits = grouped.get(key)
+        if hits:
             jobs.append(JobDocuments(len(jobs) + 1, tenants[audit.tenant_id], audit,
-                                     index_name(audit.tenant_id), _newest_document_first(documents)))
+                                     index_name(audit.tenant_id), _newest_hit_first(hits)))
     return SuperIndexResult(terms, audits, jobs, unmatched, missing, total, outside_year)
 
 
@@ -372,8 +393,23 @@ def _not_negative(value: str) -> int:
     return number
 
 
-def run_cli(prog: str, description: str, terms: dict[str, str], argv: list[str] | None = None) -> int:
-    """Shared CLI for the cloud specific commands: exit code 0 on success, 1 on failure."""
+def save_hits(result: SuperIndexResult, path: Path) -> None:
+    """Write the ordered hits to the JSON file, replacing it in place, and say so on stderr."""
+    hits = result.ordered_hits()
+    replaced = write_json(hits, path)
+    stderr.print(f"[bold green]✔[/] {'Updated' if replaced else 'Created'} {escape(display_path(path))} "
+                 f"[dim]· {plural(len(hits), 'hit')}[/]", highlight=False)
+
+
+def run_cli(
+    prog: str,
+    description: str,
+    terms: dict[str, str],
+    argv: list[str] | None = None,
+    output: Path | None = None,
+) -> int:
+    """Shared CLI for the cloud specific commands: exit code 0 on success, 1 on failure.
+    With an output path, the ordered hits are also saved there (-o changes the path)."""
     parser = argparse.ArgumentParser(prog=prog, description=description)
     parser.add_argument("--year", type=int, default=DEFAULT_YEAR, help=f"year of audit_date and document timestamp (default: {DEFAULT_YEAR})")
     parser.add_argument("--status", default=DEFAULT_STATUS, help=f"audit status (default: {DEFAULT_STATUS})")
@@ -382,6 +418,9 @@ def run_cli(prog: str, description: str, terms: dict[str, str], argv: list[str] 
                         help=f"documents listed per job, 0 for all (default: {DEFAULT_SHOWN})")
     parser.add_argument("-j", "--json", action="store_true", help="print the ordered object as JSON")
     parser.add_argument("-q", "--quiet", action="store_true", help="no progress lines while fetching")
+    if output:
+        parser.add_argument("-o", "--output", type=Path, default=output, metavar="PATH",
+                            help=f"JSON file of the ordered hits, replaced on every run (default: {display_path(output)})")
     args = parser.parse_args(argv)
 
     try:
@@ -391,6 +430,13 @@ def run_cli(prog: str, description: str, terms: dict[str, str], argv: list[str] 
         status(False, f"Could not read the super index: {exc}")
         hint(exc.hints)
         return 1
+
+    if output:
+        try:
+            save_hits(result, args.output)
+        except OSError as exc:
+            status(False, f"Could not write {args.output}: {exc}")
+            return 1
 
     if args.json:
         print(json.dumps(result.to_dict(), default=str))

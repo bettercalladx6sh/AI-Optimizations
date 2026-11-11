@@ -14,12 +14,17 @@ Each document's job_id is matched to the completed data_ingestion_audit rows of 
 live in app/server/opensearch/super_index.py, shared with the AWS EC2 command. Read-only on
 OpenSearch and on the company database.
 
+Every run also saves the matched hits, exactly as OpenSearch returned them (_index, _id,
+_score, _source) and in the same newest-first order, to opensearch_results/azure_opensearch.json.
+The same file is replaced on each run; -o writes somewhere else.
+
 Usage:
     python -m app.server.opensearch.azure.vm_super_index               # newest job first
     python -m app.server.opensearch.azure.vm_super_index --show 0      # list every document
     python -m app.server.opensearch.azure.vm_super_index --year 2025   # timestamps and audits of 2025
     python -m app.server.opensearch.azure.vm_super_index --json        # the ordered object
     python -m app.server.opensearch.azure.vm_super_index -q            # no progress lines
+    python -m app.server.opensearch.azure.vm_super_index -o vms.json   # save the hits to another file
 
 From code:
     from app.server.opensearch.azure.vm_super_index import fetch_vm_documents
@@ -32,11 +37,12 @@ import sys
 
 from app.server.mysql.data_ingestion_audit import DEFAULT_STATUS, DEFAULT_YEAR
 from app.server.mysql.ingestion_modules import DEFAULT_MODULE
-from app.server.opensearch.super_index import SuperIndexResult, fetch_super_index, run_cli
+from app.server.opensearch.super_index import RESULTS_DIR, SuperIndexResult, fetch_super_index, run_cli
 
 CLOUD_TYPE = "AZURE"
 SERVICE_TYPE = "microsoft.compute_virtualmachines"
 TERMS = {"cloud_type.keyword": CLOUD_TYPE, "service_type.keyword": SERVICE_TYPE}
+OUTPUT_PATH = RESULTS_DIR / "azure_opensearch.json"
 
 
 def fetch_vm_documents(
@@ -55,6 +61,7 @@ def main(argv: list[str] | None = None) -> int:
         "Azure VM super index documents of the active tenants, newest completed job first (read-only).",
         TERMS,
         argv,
+        output=OUTPUT_PATH,
     )
 
 
